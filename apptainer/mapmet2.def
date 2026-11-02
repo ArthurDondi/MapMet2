@@ -1,0 +1,277 @@
+Bootstrap: docker
+From: rocker/rstudio:4.4.0
+
+# =============================================================================
+# MapMet2 — Apptainer image for the R-based single-cell analysis of
+#           neuroblastoma bone-marrow (BM) cytospins
+# =============================================================================
+#
+# Adapted from MapMetSC's apptainer/mapmetsc.def. The R environment is built
+# "from scratch" on the same pinned base (rocker/rstudio:4.4.0 -> R 4.4.0,
+# Bioconductor 3.19), so MapMet2 and MapMetSC run on identical package versions.
+# One image runs the whole MapMet2 pipeline (analysis/01_read_data ...
+# 06_generate_images). BM samples are cytospins, so there is no spatial step and
+# the imcRtools::testInteractions requirement of MapMetSC does not apply; the
+# only imcRtools function used here is read_steinbock().
+#
+# The diffcyt / CATALYST / edgeR stack is kept although the core pipeline does
+# not use it yet, so the comparative analyses carried over from MapMetSC can be
+# added later without rebuilding the image.
+#
+# Build:   apptainer build mapmet2.sif mapmet2.def
+# Run:     apptainer exec --bind <singlecelldata>:/mnt/data mapmet2.sif \
+#              Rscript run_analysis.R
+# (see apptainer/README.md and %help for RStudio usage)
+# =============================================================================
+
+%labels
+    Maintainer      TaschnerMandl group (MapMet2, adapted from MapMetSC)
+    Description     MapMet2 single-cell analysis of neuroblastoma bone marrow
+    Base            rocker/rstudio:4.4.0 (R 4.4.0, Bioconductor 3.19)
+
+%post
+    set -e
+    export DEBIAN_FRONTEND=noninteractive
+
+    # ---------------------------------------------------------------------
+    # System libraries (same set as MapMetSC):
+    #   EBImage        -> libtiff, libjpeg, libpng, libfftw3
+    #   ggrastr/ragg   -> libpng, libfreetype6, libharfbuzz, libfribidi, fontconfig
+    #   tiff            -> libtiff
+    #   sf/terra (imcRtools deps) -> libgdal, libproj, libudunits2
+    #   igraph          -> libglpk
+    #   magick (cytomapper) -> libmagick++
+    # Runtime shared libs that Posit *binary* packages dlopen at load time:
+    #   git2r (needed by workflowr, loaded from .Rprofile) -> libgit2
+    #   sf (imcRtools)                                      -> libgeos
+    #   V8 (transitive dependency)                          -> libnode
+    # Plus the rendering toolchain the pipeline needs from a bare Rscript:
+    #   rmarkdown::render -> pandoc (rocker bundles it with RStudio Server, but
+    #                        it is NOT on PATH outside an RStudio session)
+    #   figures use dev="png" -> the cairo device needs system fonts
+    # ---------------------------------------------------------------------
+    apt-get -y update
+    apt-get install -y --no-install-recommends \
+        apt-utils \
+        ca-certificates curl git \
+        pandoc \
+        fonts-dejavu-core fonts-liberation \
+        libarchive-dev \
+        libcairo2-dev \
+        libcurl4-openssl-dev \
+        libfftw3-dev \
+        libfontconfig1-dev \
+        libfreetype6-dev \
+        libfribidi-dev \
+        libgdal-dev \
+        libgeos-dev \
+        libgit2-dev \
+        libglpk-dev \
+        libgsl-dev \
+        libharfbuzz-dev \
+        libjpeg-dev \
+        libmagick++-dev \
+        libnode-dev \
+        libpng-dev \
+        libproj-dev \
+        libssl-dev \
+        libtiff-dev \
+        libudunits2-dev \
+        libxml2-dev \
+        libxt-dev \
+        libzstd-dev \
+        zlib1g-dev
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+
+    # ---------------------------------------------------------------------
+    # R packages. CRAN installs come from the rocker base's pinned Posit
+    # Package Manager snapshot (2024-06-13; reproducible, mostly binary).
+    #
+    # Bioconductor is PINNED to 3.19 to match that CRAN snapshot (BiocManager
+    # would otherwise default to 3.20, whose packages need CRAN packages newer
+    # than the frozen snapshot). The Bioconductor 3.19 repos are added to
+    # options(repos) directly and installed with plain install.packages(),
+    # avoiding BiocManager's version-switch handshake, which fails behind a
+    # strict HPC egress proxy. A retry-only-missing loop absorbs intermittent
+    # 504s from bioconductor.org, and a final completeness check aborts the
+    # build if anything is still missing.
+    # ---------------------------------------------------------------------
+    Rscript - <<'RSCRIPT'
+options(
+    Ncpus   = min(parallel::detectCores(), 8L),  # parallel, capped to avoid OOM
+    timeout = 600                                 # big tarballs on slow mirrors
+)
+Sys.setenv(R_BIOC_VERSION = "3.19")   # also pins BiocManager for interactive use
+
+installed_ok <- function(pkgs)
+    vapply(pkgs, requireNamespace, logical(1), quietly = TRUE)
+
+# Retry an installer, each round attempting only the packages that are still
+# missing (optionally sleeping between rounds).
+retry_install <- function(pkgs, installer, tries = 12L, label = "install", sleep = 0) {
+    for (i in seq_len(tries)) {
+        todo <- pkgs[!installed_ok(pkgs)]
+        if (!length(todo)) return(invisible(TRUE))
+        if (i > 1L && sleep > 0) Sys.sleep(sleep)
+        message(sprintf("[%s] attempt %d/%d - %d remaining: %s",
+                        label, i, tries, length(todo),
+                        paste(todo, collapse = ", ")))
+        try(installer(todo), silent = FALSE)
+    }
+    invisible(!length(pkgs[!installed_ok(pkgs)]))
+}
+
+## --- helpers first --------------------------------------------------------
+retry_install(c("remotes", "BiocManager"), install.packages, tries = 4L,
+              label = "bootstrap")
+
+## Bioconductor 3.19 repositories next to the rocker CRAN snapshot.
+options(repos = c(
+    getOption("repos"),                                  # CRAN = rocker snapshot
+    BioCsoft      = "https://bioconductor.org/packages/3.19/bioc",
+    BioCann       = "https://bioconductor.org/packages/3.19/data/annotation",
+    BioCexp       = "https://bioconductor.org/packages/3.19/data/experiment",
+    BioCworkflows = "https://bioconductor.org/packages/3.19/workflows"
+))
+
+## Bioconductor first: some CRAN packages (e.g. tidyHeatmap) depend on Bioc.
+bioc_pkgs <- c(
+    "SingleCellExperiment", "SpatialExperiment", "SummarizedExperiment",
+    "imcRtools", "cytomapper", "CATALYST", "scater", "scuttle",
+    "dittoSeq", "batchelor", "diffcyt", "SingleR",
+    "ComplexHeatmap", "BiocParallel", "BioQC", "edgeR", "EBImage",
+    "tidyHeatmap"                     # CRAN pkg, but needs ComplexHeatmap (Bioc)
+)
+retry_install(bioc_pkgs, install.packages, tries = 25L, label = "bioc", sleep = 8)
+
+## --- CRAN -----------------------------------------------------------------
+cran_pkgs <- c(
+    # rendering / project
+    "rmarkdown", "knitr", "workflowr",
+    # io (writexl writes the cluster-annotation template in 04_phenotyping)
+    "readxl", "writexl", "openxlsx",
+    # tidyverse + plotting
+    "tidyverse", "patchwork", "cowplot", "ggrepel", "ggridges",
+    "ggrastr", "ggdendro", "ggpubr", "scales", "viridis",
+    "RColorBrewer", "paletteer", "circlize", "colorspace",
+    "pheatmap", "gridExtra", "gridGraphics", "hexbin",
+    # stats / clustering / models
+    "mclust", "harmony", "lme4", "gtools", "rstatix",
+    "factoextra", "FactoMineR", "bruceR",
+    # single cell (CRAN side)
+    "Seurat", "SeuratObject", "uwot", "tiff", "Matrix"
+)
+retry_install(cran_pkgs, install.packages, tries = 6L, label = "cran")
+
+## --- GitHub (pinned commit, as in MapMetSC) ------------------------------
+retry_install("Rphenoannoy", function(pkgs)
+    remotes::install_github(
+        "stuchly/Rphenoannoy@8b81e2e7fb0599f45070e2cba1b28ac219b7c472",
+        upgrade = "never"),
+    tries = 4L, label = "github")
+
+## --- Completeness check -------------------------------------------------
+required <- unique(c(cran_pkgs, bioc_pkgs, "Rphenoannoy"))
+missing  <- required[!installed_ok(required)]
+if (length(missing)) {
+    message("MISSING PACKAGES: ", paste(missing, collapse = ", "))
+    quit(status = 1L)
+}
+
+## requireNamespace() does not dlopen a package's compiled shared object, so a
+## missing runtime system library installs fine yet fails on load. ATTACH the
+## startup + shared-lib packages here so any such gap fails the BUILD instead
+## of at `.Rprofile`/render time.
+for (p in c("git2r", "workflowr", "sf", "imcRtools")) {
+    ok <- tryCatch({ suppressPackageStartupMessages(library(p, character.only = TRUE)); TRUE },
+                   error = function(e) { message("LOAD ERROR for ", p, ": ", conditionMessage(e)); FALSE })
+    if (!ok) quit(status = 1L)
+}
+
+## The pipeline renders every step with rmarkdown::render, which needs pandoc
+## and a cairo-usable font for dev="png". Smoke-test the whole chain at build.
+{
+    td  <- tempfile(fileext = ".Rmd")
+    writeLines(c("---", "title: smoke", "output: html_document", "---", "",
+                 "```{r, dev='png'}", "plot(1:3, main = 'ok'); 1 + 1", "```"), td)
+    ok <- tryCatch({ rmarkdown::render(td, quiet = TRUE, output_dir = tempdir()); TRUE },
+                   error = function(e) { message("RENDER ERROR (pandoc/fonts?): ",
+                                                  conditionMessage(e)); FALSE })
+    if (!ok) quit(status = 1L)
+    cat("rmarkdown render OK (pandoc + png device found).\n")
+}
+
+cat("Bioconductor:", Sys.getenv("R_BIOC_VERSION"),
+    "| imcRtools:", as.character(utils::packageVersion("imcRtools")), "\n")
+cat("All", length(required), "packages installed.\n")
+RSCRIPT
+
+    # Lightweight manifest in the image for provenance.
+    Rscript -e 'writeLines(capture.output(sessionInfo()), "/opt/mapmet2-sessionInfo.txt")
+ip <- as.data.frame(installed.packages()[, c("Package", "Version")])
+write.csv(ip, "/opt/mapmet2-packages.csv", row.names = FALSE)'
+
+%environment
+    export LC_ALL=C.UTF-8
+    export LANG=C.UTF-8
+    # Headless rendering: no X server inside the container.
+    export R_ENABLE_JIT=0
+    # Keep interactive BiocManager use pinned to the release the image was built
+    # against (matches the frozen CRAN snapshot).
+    export R_BIOC_VERSION=3.19
+
+%runscript
+    # `apptainer run img.sif`            -> interactive R
+    # `apptainer run img.sif Rscript x`  -> runs the given command
+    if [ $# -eq 0 ]; then
+        exec R --no-save
+    else
+        exec "$@"
+    fi
+
+%test
+    # Sanity check executed at the end of `apptainer build`.
+    Rscript -e '
+        pkgs <- c("imcRtools","cytomapper","SingleR","ComplexHeatmap","Seurat",
+                  "scater","dittoSeq","mclust","EBImage","ggrastr","writexl",
+                  "tidyverse","Rphenoannoy")
+        ok <- vapply(pkgs, requireNamespace, logical(1), quietly = TRUE)
+        if (any(!ok)) { cat("FAILED to load:", paste(pkgs[!ok], collapse=", "), "\n"); quit(status=1) }
+        cat("OK:", length(pkgs), "key packages load.\n")
+    '
+
+%help
+    MapMet2 single-cell analysis image (neuroblastoma bone marrow, IMC).
+
+    Data layout (see README): the scripts expect the extracted single-cell
+    data under /mnt/data (input_all, public_datasets) and write to
+    /mnt/data/output_mapmet2 unless MAPMET2_OUTPUT says otherwise.
+
+    Render the full pipeline (headless):
+      apptainer exec --bind /path/to/singlecelldata:/mnt/data \
+          mapmet2.sif Rscript run_analysis.R
+
+    Render one script:
+      apptainer exec --bind /path/to/singlecelldata:/mnt/data mapmet2.sif \
+          Rscript -e 'rmarkdown::render("analysis/04_phenotyping.Rmd",
+                        output_dir="docs",
+                        params=list(input="/mnt/data/input_all",
+                                    output="/mnt/data/output_mapmet2"))'
+
+    Interactive R:
+      apptainer run --bind /path/to/singlecelldata:/mnt/data mapmet2.sif
+
+    RStudio Server (optional; the base image ships it). Apptainer containers
+    are read-only, so redirect the server's writable dirs to a bind mount:
+      mkdir -p rstudio-run/{tmp,var,run}
+      PASSWORD=mapmet2 apptainer exec \
+          --bind rstudio-run/var:/var/lib/rstudio-server \
+          --bind rstudio-run/run:/var/run/rstudio-server \
+          --bind rstudio-run/tmp:/tmp \
+          --bind /path/to/MapMet2:/home/rstudio/MapMet2 \
+          --bind /path/to/singlecelldata:/mnt/data \
+          mapmet2.sif \
+          /usr/lib/rstudio-server/bin/rserver --www-port 8787 \
+              --auth-none 0 --auth-pam-helper-path=pam-helper --server-user=$(whoami)
+      then open http://localhost:8787

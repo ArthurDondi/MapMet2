@@ -1,0 +1,449 @@
+---
+title: "Quality control - Part 1"
+author: "LazDaria, ArthurDondi"
+date: "`r Sys.Date()`"
+output:
+  workflowr::wflow_html
+editor_options:
+  chunk_output_type: inline
+params:
+  input: !r Sys.getenv("MAPMET2_INPUT", "/mnt/data/input_all")
+  output: !r Sys.getenv("MAPMET2_OUTPUT", "/mnt/data/output_mapmet2")
+  # Lost-cell clusters of THIS run's phenograph clustering (e.g. c("26")). When
+  # set, they are excluded and the kept-cell list is re-frozen; NULL = use the
+  # frozen kept_cells_BM.rds if present, else the IMC-DNA heuristic below.
+  lost_cell_clusters: !r NULL
+  # Heuristic: a cluster is "lost" when its mean IMC DNA (Ir191/Ir193) signal is
+  # below this fraction of the median cluster mean.
+  lost_dna_frac: 0.25
+---
+
+```{r setup, include=FALSE}
+plot_dir <- file.path(params$output, "plots/02_QC_1")
+if (!dir.exists(plot_dir)) {
+  dir.create(plot_dir, recursive = TRUE)
+}
+
+date_prefix <- format(Sys.Date(), "%Y%m%d")
+
+# Save a plot (ggplot / Heatmap / base R)
+save_plot <- function(plot_obj, filename, width = 8, height = 6, dpi = 300) {
+  full_path <- file.path(plot_dir, paste0(date_prefix, "_", filename))
+
+  if (inherits(plot_obj, "ggplot")) {
+    ggsave(full_path, plot = plot_obj, width = width, height = height, dpi = dpi, bg = "white")
+  } else if (inherits(plot_obj, "Heatmap") || inherits(plot_obj, "HeatmapList")) {
+    # ComplexHeatmap -> PDF
+    pdf(full_path, width = width, height = height)
+    draw(plot_obj)
+    dev.off()
+  } else {
+    dev.copy(png, full_path, width = width * dpi, height = height * dpi, res = dpi)
+    dev.off()
+  }
+  message("Saved: ", full_path)
+}
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  error = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  dev = "png",
+  dpi = 300,
+  fig.width = 8,
+  fig.height = 6
+)
+```
+
+# Quality control - Exclusion of lost cells {#qc-1}
+Segmentation in [MapMetIP](https://github.com/TaschnerMandlGroup/MapMetIP) is performed based on high-resolution IF images. However, due to the washing step between IF microscopy and IMC staining, some cells might be lost. These have to be excluded before downstream analysis.
+
+## Load libraries
+<details>
+   <summary>Load libraries</summary>
+
+```{r load-libraries}
+library(ggplot2)
+library(dplyr)
+library(ComplexHeatmap)
+library(viridis)
+library(circlize)
+library(RColorBrewer)
+library(paletteer)
+library(Rphenoannoy)
+library(scuttle)
+library(cytomapper)
+library(cowplot)
+library(gridGraphics)
+library(SpatialExperiment)
+library(ggrastr)
+library(hexbin)
+```
+</details>
+
+## Read SPE object
+
+We will first read the spatial experiment object (SPE) generated in the [read data section](#read-data).
+
+```{r read-steinbock}
+
+path <- params$output
+spe <- readRDS(file.path(path,"spe_01_read_data.rds"))
+```
+
+## Exclude lost cells
+
+### Quality control step 1
+In a first step, we exclude cells, that have a mean intensity of zero for all IMC channels. For that, we will use the intensities measured based on the non-dilated masks (stored in `counts`) to avoid capturing signals from neighboring cells. To correctly identify lost cells in the clustering step below, we use the mean of the 20% highest pixel intensities as a measure for marker intensity here, as this feature is less dependent on cell size.
+
+```{r cell-exclusion-1}
+
+# non-dilated masks (counts assay)
+intensity_mat <- assay(spe, "counts")
+colnames(intensity_mat) <- spe$sample_id
+
+# mean-80 (top-20% pixels): less dependent on cell size
+intensity_mat_mean_80 <- intensity_mat[grepl("mean-80", rownames(intensity_mat)),]
+
+# drop cells that are all-zero across IMC channels
+intensity_mat_imc <- intensity_mat_mean_80[!grepl("IF2_GD2|IF3_CD45|DAPI", rownames(intensity_mat_mean_80)),]
+non_zeros <- as.logical(colSums(intensity_mat_imc)!=0)
+
+spe <- spe[, non_zeros]
+mat <- intensity_mat_mean_80[, non_zeros]
+```
+
+We excluded `r length(non_zeros[non_zeros==FALSE])` cells in this first quality control step.
+
+For the next quality control step, we will only consider IMC and nuclear IF channels.
+```{r cell-exclusion-2}
+mat <- mat[!grepl("IF2_GD2|IF3_CD45", rownames(mat)),]
+```
+
+### Quality control step 2
+Although, we excluded all cells with zero mean intensities in all IMC channels, there might still be some cells, which actually swam off between IF and IMC and have IMC counts due to background noise or lateral spillover. These form a cluster of cells expressing the IF marker DAPI, but no IMC markers (including the IMC DNA intercalator, Ir191/Ir193).
+
+```{r data-visualization, fig.width=11, fig.height=9}
+# qualitative palettes from 00_MapMet_color_code.R
+for (mapmet_cc_path in c("analysis/00_MapMet_color_code.R", "00_MapMet_color_code.R", "../analysis/00_MapMet_color_code.R"))
+  if (file.exists(mapmet_cc_path)) { source(mapmet_cc_path); break }
+col_vector_433 <- COL_VECTOR_433
+
+sample_names <- sub("_[^_]+$", "", colnames(mat))
+col_sample <- setNames(sample(col_vector_433, length(unique(sample_names))), unique(sample_names))
+
+set.seed(221228)
+rand_cells <- sample(seq_len(ncol(mat)), min(2000, ncol(mat)))
+
+column_ha <- HeatmapAnnotation(sample = sample_names[rand_cells],
+                              col=list(sample=col_sample),
+                              show_legend=F)
+
+p1 <- Heatmap(mat[,rand_cells],
+        column_title = "Single-cell heatmap",
+        top_annotation = column_ha,
+        show_column_dend = F,
+        show_column_names=F,
+        col=viridis(100)
+        )
+
+save_plot(p1, "heatmap_mean80.png", width = 8, height = 6)
+
+p1
+```
+
+We will cluster the data to identify cells that swam off.
+
+```{r phenograph-clustering}
+# Rphenoannoy is not bit-reproducible across igraph versions / compilers / CPUs,
+# so the kept-cell list derived below is frozen in R_intermediary and reused by
+# later runs instead of these cluster numbers.
+set.seed(230619)
+
+mat <- t(mat)
+Rphenograph_out <- Rphenoannoy(mat, k = 45)
+clusters <- factor(membership(Rphenograph_out[[2]]))
+
+spe$pg_clusters_lostcells <- clusters
+
+# Lost-cell heuristic: DAPI-positive (IF) cells without IMC DNA signal. Mean IMC
+# DNA (Ir191/Ir193, mean-80) per cluster vs the median over clusters.
+dna_cols  <- grepl("Ir191|Ir193", colnames(mat))
+dapi_cols <- grepl("DAPI", colnames(mat))
+cluster_dna <- data.frame(
+  cluster  = levels(clusters),
+  n_cells  = as.integer(table(clusters)[levels(clusters)]),
+  imc_dna  = as.numeric(tapply(rowMeans(mat[, dna_cols,  drop = FALSE]), clusters, mean)[levels(clusters)]),
+  if_dapi  = as.numeric(tapply(rowMeans(mat[, dapi_cols, drop = FALSE]), clusters, mean)[levels(clusters)])
+)
+cluster_dna$imc_dna_rel <- cluster_dna$imc_dna / median(cluster_dna$imc_dna)
+lost_suggested <- cluster_dna$cluster[which(cluster_dna$imc_dna_rel < params$lost_dna_frac)]
+if (!any(dna_cols)) {
+  warning("No IMC DNA (Ir191/Ir193) mean-80 channel found: the lost-cell heuristic suggests nothing.")
+  lost_suggested <- character(0)
+}
+
+knitr::kable(cluster_dna[order(cluster_dna$imc_dna_rel), ], digits = 3, row.names = FALSE,
+             caption = paste0("Per-cluster mean IMC DNA and IF DAPI (mean-80). Suggested lost-cell cluster(s): ",
+                              if (length(lost_suggested)) paste(lost_suggested, collapse = ", ") else "none"))
+```
+
+Next, we will have a look at the mean marker expression per cluster in a heatmap; the cluster(s) suggested as lost cells by the IMC-DNA heuristic are marked.
+
+```{r data-visualization-2, fig.width=11, fig.height=9}
+mean <- aggregate(mat, list(clusters), mean)
+mean_t <- t(mean[,2:ncol(mean)])
+colnames(mean_t) <- mean[,"Group.1"]
+
+n <- length(unique(clusters))
+col_clusters <- setNames(sample(col_vector_433, n), unique(clusters))
+
+column_ha = HeatmapAnnotation(cluster = mean[,"Group.1"],
+                              lost = ifelse(mean[,"Group.1"] %in% lost_suggested, "suggested", "no"),
+                              ncells=anno_barplot(as.data.frame(table(clusters))[,"Freq"], height = unit(3, "cm")),
+                              col=list(cluster=col_clusters, lost = c(suggested = "red", no = "white")),
+                              show_legend=T)
+
+p <- Heatmap(mean_t,
+        column_title = "Cluster-means heatmap",
+        top_annotation = column_ha,
+        cluster_columns=T,
+        show_column_dend = F,
+        show_column_names=T,
+        show_row_names=T,
+        col=viridis(100)
+        )
+
+save_plot(p, "heatmap_clusters.png", width = 8, height = 6)
+
+p
+```
+
+The cluster with DAPI signal but no IMC markers in the heatmap above is the "lost cells" cluster - cells that swam off between IF and IMC. Because `Rphenoannoy` is not reproducible across igraph versions, compilers or CPUs, the exact clusters can differ between machines, so the decision is frozen as a list of kept cells. The cells to keep are taken from, in order of precedence:
+
+1. `params$lost_cell_clusters` - lost-cell clusters chosen from the heatmap of **this** run (the kept-cell list is then re-frozen);
+2. the frozen `kept_cells_BM.rds` (in `MAPMET2_INTERMEDIARY`, `<input>/R_intermediary`, `<input>/../R_intermediary` or `<output>/R_intermediary`);
+3. the IMC-DNA heuristic above (first run). The resulting list is frozen to `<output>/R_intermediary/kept_cells_BM.rds`.
+
+```{r load-kept-cells, message=TRUE}
+kept_name <- "kept_cells_BM.rds"
+inter_dirs <- c(Sys.getenv("MAPMET2_INTERMEDIARY", ""),
+                file.path(params$input,  "R_intermediary"),
+                file.path(dirname(params$input), "R_intermediary"),
+                file.path(params$output, "R_intermediary"))
+inter_dirs <- inter_dirs[nzchar(inter_dirs)]
+kept_file  <- Find(file.exists, file.path(inter_dirs, kept_name))
+freeze_dir <- file.path(params$output, "R_intermediary")
+
+n_before <- ncol(spe)
+if (length(params$lost_cell_clusters)) {
+  lost_clusters <- as.character(params$lost_cell_clusters)
+  unknown <- setdiff(lost_clusters, levels(spe$pg_clusters_lostcells))
+  if (length(unknown))
+    stop("params$lost_cell_clusters not among this run's clusters: ", paste(unknown, collapse = ", "))
+  keep <- !(as.character(spe$pg_clusters_lostcells) %in% lost_clusters)
+  kept_source <- paste0("params$lost_cell_clusters (", paste(lost_clusters, collapse = ", "), ")")
+} else if (!is.null(kept_file)) {
+  kept_raw <- readRDS(kept_file)
+  # ids are the vector itself, or its names (older format)
+  kept_ids <- if (!is.null(names(kept_raw))) names(kept_raw) else as.character(kept_raw)
+  keep <- colnames(spe) %in% kept_ids
+  n_missing <- length(setdiff(kept_ids, colnames(spe)))
+  if (!any(keep))
+    stop("None of the ", length(kept_ids), " cells in ", kept_file, " match this run's ",
+         "cells - wrong file or cell-id scheme (kept e.g. '", head(kept_ids, 1),
+         "', current e.g. '", head(colnames(spe), 1), "').")
+  if (n_missing > 0)
+    message(n_missing, " of ", length(kept_ids), " kept-list cells are not in this run's ",
+            "post-QC1 set (already excluded by cell-exclusion-1) - ignoring them. A large ",
+            "count means the list does not match this input.")
+  kept_source <- paste0("frozen list ", kept_file)
+} else {
+  keep <- !(as.character(spe$pg_clusters_lostcells) %in% lost_suggested)
+  kept_source <- paste0("IMC-DNA heuristic (lost cluster(s): ",
+                        if (length(lost_suggested)) paste(lost_suggested, collapse = ", ") else "none", ")")
+}
+
+spe <- spe[, keep]
+message("Lost-cell exclusion via ", kept_source, ": kept ", ncol(spe), " of ", n_before,
+        " post-QC1 cells.")
+
+# Freeze the decision for later runs (not needed when it came from a frozen list)
+if (!startsWith(kept_source, "frozen list")) {
+  dir.create(freeze_dir, showWarnings = FALSE, recursive = TRUE)
+  saveRDS(colnames(spe), file.path(freeze_dir, kept_name))
+  message("Saved frozen kept-cell list: ", file.path(freeze_dir, kept_name))
+}
+```
+
+### DNA-intensity check
+
+As a further check on the surviving cells, we compare each cell's DNA intensity
+against its total (non-DNA) protein intensity and quantify the fraction of
+low-DNA cells per sample. The per-cell DNA intensity is stored on the SPE object
+for downstream use; no cells are excluded at this step.
+
+```{r dna-protein-correlation}
+
+counts_matrix <- assay(spe, "counts")
+
+# DNA channels, and channels excluded from the protein total
+dna_idx <- grepl("DNA|Ir191|Ir193|DAPI", rownames(counts_matrix), ignore.case = TRUE)
+unused_idx <- grepl("PARP|IDO|DAPI|IF2_GD2|IF3_CD45_CD56|DNA1|H4K12Ac|H3K9Ac|CXCR2|PNMT|Fibro",  rownames(counts_matrix))
+
+dna_intensity <- colSums(counts_matrix[dna_idx, , drop = FALSE])
+total_intensity_noDNA <- colSums(counts_matrix[!unused_idx, , drop = FALSE])
+
+colData(spe)$DNAIntensity <- dna_intensity
+colData(spe)$TotalIntensity_noDNA <- total_intensity_noDNA
+
+df <- as.data.frame(colData(spe))
+
+# linear fit + Spearman for the plot annotation
+fit <- lm(TotalIntensity_noDNA ~ DNAIntensity, data = df)
+r2 <- summary(fit)$r.squared
+spearman_cor <- cor(df$DNAIntensity, df$TotalIntensity_noDNA, method = "spearman")
+
+p <- ggplot(df, aes(x = DNAIntensity, y = TotalIntensity_noDNA)) +
+  geom_point_rast(alpha = 0.05, size = 0.3) +
+  geom_smooth(method = "lm", color = "red") +
+  theme_minimal() +
+  labs(
+    title = paste0(
+      "DNA vs Total intensity (non-DNA)\nR² = ",
+      round(r2, 3),
+      " | Spearman = ",
+      round(spearman_cor, 3)
+    ),
+    x = "DNA intensity",
+    y = "Total protein intensity"
+  )
+
+p
+
+save_plot(p, "DNA_protein_correlation_scatter.png", width = 12, height = 12, dpi = 600)
+```
+
+```{r low-dna-threshold}
+
+spe_sub <- spe
+
+counts_matrix <- assay(spe_sub, "counts")
+
+# DNA channels (no DAPI here) and channels excluded from the protein total
+dna_idx <- grepl("DNA|Ir191|Ir193", rownames(counts_matrix), ignore.case = TRUE)
+
+unused_idx <- grepl("PARP|IDO|DAPI|IF2_GD2|IF3_CD45_CD56|DNA1|H4K12Ac|H3K9Ac|CXCR2|PNMT|Fibro",
+                   rownames(counts_matrix), ignore.case = TRUE)
+
+dna_intensity <- colSums(counts_matrix[dna_idx, , drop = FALSE])
+total_intensity_noDNA <- colSums(counts_matrix[!unused_idx, , drop = FALSE])
+
+colData(spe_sub)$DNAIntensity <- dna_intensity
+colData(spe_sub)$TotalIntensity_noDNA <- total_intensity_noDNA
+
+df <- as.data.frame(colData(spe_sub))
+
+# low-DNA threshold (23rd percentile)
+low_dna_threshold <- quantile(df$DNAIntensity, 0.23)
+
+# Spearman in the low-DNA subset (reported only)
+df_low <- df %>% filter(DNAIntensity < low_dna_threshold)
+low_dna_cor <- cor(df_low$DNAIntensity, df_low$TotalIntensity_noDNA, method = "spearman")
+message("Spearman correlation in low DNA cells: ", round(low_dna_cor, 3))
+
+p1 <- ggplot(df, aes(x = DNAIntensity, y = TotalIntensity_noDNA)) +
+  geom_hex(bins = 100) +
+  scale_fill_viridis_c() +
+  geom_vline(xintercept = low_dna_threshold, color = "red", linetype = "dashed") +
+  theme_minimal() +
+  labs(title = "DNA vs Total (non-DNA, filtered) intensity (density plot)",
+       subtitle = paste("Low DNA cutoff at", round(low_dna_threshold, 3)),
+       x = "DNA intensity",
+       y = "Total protein intensity")
+
+# median + mean protein intensity per DNA bin
+df_summary <- df %>%
+  mutate(bin = cut(DNAIntensity, breaks = 50)) %>%
+  group_by(bin) %>%
+  summarise(
+    DNA = mean(DNAIntensity),
+    MedianTotal = median(TotalIntensity_noDNA),
+    MeanTotal = mean(TotalIntensity_noDNA)
+  )
+
+p_combined <- ggplot(df_summary, aes(x = DNA)) +
+  geom_line(aes(y = MedianTotal, color = "Median"), size = 1) +
+  geom_line(aes(y = MeanTotal, color = "Mean"), size = 1, linetype = "dashed") +
+  geom_vline(xintercept = low_dna_threshold, color = "red", linetype = "dashed") +
+  theme_minimal() +
+  scale_color_manual(name = "Statistic", values = c("Median" = "blue", "Mean" = "darkgreen")) +
+  labs(title = "Total protein intensity per DNA bin",
+       subtitle = paste("Low DNA cutoff at", round(low_dna_threshold, 3)),
+       x = "DNA (DAPI+DNA1/2) intensity",
+       y = "Total protein intensity")
+
+
+save_plot(p_combined, "DNA_protein_correlation_bin_mean.png", width = 12, height = 12)
+save_plot(p1, "DNA_protein_correlation_density.png", width = 12, height = 12)
+
+print(p_combined)
+print(p1)
+
+```
+
+
+```{r low-dna-samples, fig.width=12, fig.height=24}
+
+df <- as.data.frame(colData(spe_sub))
+df <- df %>% mutate(LowDNA = DNAIntensity < low_dna_threshold)
+
+# % low-DNA cells per sample, colored by timepoint
+df_summary <- df %>%
+  group_by(fm_id, timepoint) %>%
+  summarise(
+    num_cells = n(),
+    percent_low_DNA = 100 * sum(LowDNA) / n(),
+    year = unique(year)
+  ) %>%
+  ungroup() %>%
+  arrange(desc(percent_low_DNA)) %>%
+  mutate(sample_label = paste(fm_id, timepoint, sep = "_"))
+
+p <- ggplot(df_summary, aes(x = percent_low_DNA, y = reorder(sample_label, percent_low_DNA), fill = timepoint)) +
+  geom_col() +
+  geom_text(aes(label = sprintf("%.1f%% (%d, %s)", percent_low_DNA, num_cells, year)),
+            hjust = -0.1, size = 3) +
+  geom_vline(xintercept = 20, color = "red", linetype = "dashed", size = 0.8) +
+  theme_minimal() +
+  scale_fill_manual(values = complete_palette(df_summary$timepoint, COL_TIMEPOINT)) +
+  labs(title = "% low-DNA cells per sample, colored by timepoint (ncells, sample year)",
+       x = "% low-DNA cells",
+       y = "Sample ID + timepoint",
+       fill = "Timepoint") +
+  expand_limits(x = max(df_summary$percent_low_DNA) * 1.25)
+
+p
+
+save_plot(p, "low_DNA_samples.png", width = 9, height = 18)
+```
+
+## Save object
+
+Finally, we save the SPE object with the lost cells removed.
+
+```{r save-objects-read-data}
+
+saveRDS(spe, file.path(params$output, "spe_02_QC_1.rds"))
+```
+
+## Session Info
+
+<details>
+   <summary>SessionInfo</summary>
+
+```{r, echo = FALSE}
+sessionInfo()
+```
+</details>

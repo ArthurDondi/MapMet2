@@ -1,0 +1,19 @@
+---
+title: "About"
+output:
+  workflowr::wflow_html:
+    toc: false
+editor_options:
+  chunk_output_type: console
+---
+
+This repository (**MapMet2**) provides the `R`-based single-cell analysis of
+neuroblastoma bone-marrow samples (control BM, and patient BM at diagnosis, the
+treatment timepoints T1 / T2 and relapse) imaged by imaging mass cytometry. It
+is adapted from [MapMetSC](https://github.com/TaschnerMandlGroup/MapMetSC), the
+single-cell workflow of Lazic et al. for primary and metastatic neuroblastoma,
+and builds on data processed with the `python`-based image-processing pipeline
+[MapMetIP](https://github.com/TaschnerMandlGroup/MapMetIP).
+
+See the [Home](index.html) page for the ordered list of analysis steps, and the
+repository `README` and `run_analysis.R` for setup and reproduction instructions.

@@ -1,0 +1,234 @@
+---
+title: "Validation of metaclusters using scRNA-seq data by Fetahu et al."
+author: "LazDaria, ArthurDondi"
+date: "`r Sys.Date()`"
+output: 
+  workflowr::wflow_html
+editor_options:
+  chunk_output_type: inline
+params: 
+  input: !r Sys.getenv("MAPMET2_INPUT", "/mnt/data/input_all")
+  output: !r Sys.getenv("MAPMET2_OUTPUT", "/mnt/data/output_mapmet2")
+  public: !r Sys.getenv("MAPMET2_PUBLIC", "/mnt/data/public_datasets")
+---
+
+```{r setup, include=FALSE}
+# Plot output directory
+plot_dir <- file.path(params$output, "plots/05.1_correlation_Fetahu")
+if (!dir.exists(plot_dir)) {
+  dir.create(plot_dir, recursive = TRUE)
+}
+
+
+date_prefix <- format(Sys.Date(), "%Y%m%d")
+
+# Save a plot to plot_dir, dispatching on its object type
+save_plot <- function(plot_obj, filename, width = 8, height = 6, dpi = 300, ...) {
+  full_path <- file.path(plot_dir, paste0(date_prefix, "_", filename))
+  
+  if (inherits(plot_obj, "ggplot")) {
+    ggsave(full_path, plot = plot_obj, width = width, height = height, dpi = dpi, bg = "white")
+  } else if (inherits(plot_obj, "Heatmap") || inherits(plot_obj, "HeatmapList")) {
+    pdf(full_path, width = width, height = height)
+    draw(plot_obj, ...)
+    dev.off()
+  } else if (inherits(plot_obj, "pheatmap")) {
+    pdf(full_path, width = width, height = height)
+    grid::grid.newpage()
+    grid::grid.draw(plot_obj$gtable)
+    dev.off()
+  } else {
+    dev.copy(png, full_path, width = width * dpi, height = height * dpi, res = dpi)
+    dev.off()
+  }
+  message("Saved: ", full_path)
+}
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  error = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  dev = "png",
+  dpi = 300,
+  fig.width = 8,
+  fig.height = 6
+)
+```
+
+# Validation using scRNA-seq data by Fetahu et al. {#fetahu}
+To evaluate the validity of the metacluster annotations, we compare the expression profiles of the MapMet2 bone-marrow cells to our previously generated scRNA-seq dataset of NB bone marrow samples ([Fetahu et al.](https://doi.org/10.1038/s41467-023-39210-0), downloaded from [Zenodo](https://doi.org/10.5281/zenodo.7707614)).
+
+## Load libraries
+<details>
+   <summary>Load libraries</summary>
+   
+```{r load-libraries}
+library(SingleR)
+library(Seurat)
+library(SingleCellExperiment)
+library(bruceR)
+library(ComplexHeatmap)
+library(viridis)
+library(RColorBrewer)
+library(BiocParallel)
+library(dittoSeq)
+```
+</details>
+
+## Read data
+First, we load the processed and phenotyped single-cell data from [chapter 4](#phenotyping) and the published Seurat object containing the scRNA-seq data. Please make sure to replace `params$public`with the path to the scRNA-seq data.
+
+```{r read-data}
+#read IMC data
+protein <- readRDS(file.path(params$output,"spe_04_phenotyping.rds"))
+protein <- protein[rowData(protein)$use_channel,]
+
+#read scRNA-seq data
+monocle_cell_dataset <- readRDS(file.path(params$public,"Fetahu/rna_integrated_monocle.rds"))
+# The Fetahu object is a monocle3 cell_data_set (a SingleCellExperiment subclass).
+# If monocle3 isn't installed, demote it to its SingleCellExperiment parent so
+# as.Seurat() still works - we only read its assays/UMAP/metadata, not run monocle3.
+if (!requireNamespace("monocle3", quietly = TRUE)) {
+  attr(monocle_cell_dataset, "class") <-
+    structure("SingleCellExperiment", package = "SingleCellExperiment")
+}
+rna <- as.Seurat(monocle_cell_dataset, data=NULL)
+rna <- RenameAssays(object = rna, originalexp = 'RNA')
+celltype_details <- readRDS(file.path(params$public,"Fetahu/metadata.rds"))
+rna@active.ident <- setNames(pull(celltype_details[match(celltype_details$cell,colnames(rna)),"cellont_cluster"], "cellont_cluster"),
+                             pull(celltype_details[match(celltype_details$cell,colnames(rna)), "cell"], "cell"))
+DefaultAssay(rna) <- "RNA"
+```
+
+## Set common features 
+Next, we will set common features between the reference and query dataset. Therefore, we have to rename the features in the imaging dataset to the names of the corresponding genes. A csv files with protein-gene mappings can be obtained from Zenodo [(protein2gene.csv)](https://doi.org/10.5281/zenodo.13220634)
+
+```{r set-common-features}
+protein2gene <- read.csv(file.path(params$public,"protein2gene.csv"), sep=";")
+
+code <- setNames(protein2gene$genes, protein2gene$protein)
+rownames(protein) <- recode(rownames(protein), !!!code)
+rowData(protein)$name <- rownames(protein)
+rowData(protein)$channel <- rownames(protein)
+
+#reduce metadata
+metadata <- c("sample_id", "ObjectNumber", "sample", "tissue", "celltype", "metacluster")
+colData(protein) <- colData(protein)[, metadata]
+
+common_features <- intersect(row.names(rna), row.names(protein))
+```
+
+## Visualize public data
+
+We will first visualize the scRNA-seq data. Therefore we first define a color code with similar colors for similar celltypes between IMC and scRNA-seq.
+
+```{r define-colors}
+# Fetahu reference cluster colors are defined centrally in 00_MapMet_color_code.R
+for (mapmet_cc_path in c("analysis/00_MapMet_color_code.R", "00_MapMet_color_code.R", "../analysis/00_MapMet_color_code.R"))
+  if (file.exists(mapmet_cc_path)) { source(mapmet_cc_path); break }
+col_clusters <- COL_FETAHU_CLUSTERS
+```
+
+
+```{r mean-per-cluster-rna, fig.width=8, fig.height=8}
+rna_clusters <- rna@active.ident
+rna_data <- GetAssayData(rna, assay = "RNA", slot = "data")[common_features, ]
+rna_mean <- aggregate(t(rna_data), list(rna_clusters), mean)
+
+rna_mean_t <- t(rna_mean[,2:ncol(rna_mean)])
+colnames(rna_mean_t) <- rna_mean[,"Group.1"]
+rna_mean_scaled <- t(apply(rna_mean_t, 1, RESCALE, to=0:1))
+
+column_ha = HeatmapAnnotation(ncells=anno_barplot(as.data.frame(table(rna_clusters))[,"Freq"], height = unit(1, "cm")),
+                              show_legend=F)
+
+h_rna <- Heatmap(rna_mean_scaled,
+        column_title = "Mean per cluster (scRNA-seq data)",
+        top_annotation = column_ha,
+        cluster_columns=T,
+        show_column_dend = T,
+        show_column_names=T,
+        show_row_names=T,
+        col=viridis(100),
+        column_names_gp = gpar(fontsize = 10),
+        column_names_max_height = max_text_width(colnames(rna_mean_scaled), gp = gpar(fontsize = 10))
+        )
+
+save_plot(h_rna, "Fetahu_rna_mean_per_cluster_heatmap.pdf", width = 8, height = 8)
+
+h_rna
+```
+
+```{r umap-rna}
+p_umap_rna <- DimPlot(rna, reduction="UMAP", cols=col_clusters) +
+  # Harmonised square panel border (all UMAPs).
+  theme(axis.line    = element_blank(),
+        panel.border = element_rect(colour = "black", fill = NA, size = 0.5))
+
+save_plot(p_umap_rna, "Fetahu_rna_umap.pdf", width = 8, height = 6)
+
+p_umap_rna
+```
+
+## Transfer labels with singleR
+Finally, we will investigate correlation between the datasets using label transfer by singleR. 
+
+```{r single-r}
+rna_mat <- GetAssayData(rna, assay = "RNA", slot = "data")[common_features, ]
+rna_clusters <- rna@active.ident
+protein_mat <- assay(protein, "counts")[common_features, ]
+
+predicted_labels <- SingleR(test = protein_mat, ref = rna_mat, labels = rna_clusters, BPPARAM = MulticoreParam(workers=10, RNGseed=20231030))
+
+```
+
+Plotting
+```{r}
+
+p<- plotScoreHeatmap(predicted_labels[sample(seq_len(nrow(predicted_labels)), 2000),],annotation_colors=list(Labels = col_clusters), annotation_legend=F, treeheight_row=0,
+                 rows.order=names(col_clusters)) 
+
+protein$predicted_celltype <- predicted_labels$labels
+
+save_plot(p, "Fetahu_labeltransfer_scoreheatmap.pdf", width = 8, height = 6)
+```
+
+For visualization purposes, we rename the predicted celltypes to their metacluster and assign colors.
+
+```{r metacluster-assignment}
+
+protein$predicted_metacluster <- sub(" \\(.*$", "", protein$predicted_celltype)
+
+col_metacluster <- COL_FETAHU_METACLUSTER
+                
+metadata(protein)$color_vectors$col_predicted_meta <- col_metacluster
+```
+
+We will plot the predicted metaclusters in a UMAP.
+
+```{r predicted-umap}
+p1 <- dittoDimPlot(protein, var = "predicted_metacluster", 
+             reduction.use = "UMAP", size = 0.3, labels.size=2,
+             do.label = F,
+             order = "randomize",
+             legend.show=T) +
+  scale_color_manual(values = metadata(protein)$color_vectors$col_predicted_meta) +
+  theme(legend.title = element_blank(), aspect.ratio = 1) +
+  ggtitle("Predicted celltype on UMAP")
+
+# Standard UMAP proportions (16x8)
+save_plot(p1, "Fetahu_predicted_metacluster_umap.pdf", width = 16, height = 8)
+
+p1
+```
+
+## Session Info
+
+<details>
+   <summary>SessionInfo</summary>
+   
+```{r, echo = FALSE}
+sessionInfo()
+```
+</details>

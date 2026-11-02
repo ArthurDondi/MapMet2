@@ -1,0 +1,952 @@
+---
+title: "Cell phenotyping"
+author: "LazDaria, ArthurDondi"
+date: "`r Sys.Date()`"
+output:
+  workflowr::wflow_html
+editor_options:
+  chunk_output_type: inline
+params:
+  input: !r Sys.getenv("MAPMET2_INPUT", "/mnt/data/input_all")
+  output: !r Sys.getenv("MAPMET2_OUTPUT", "/mnt/data/output_mapmet2")
+  # Annotated MapMetSC object (e.g. MapMetSC's <output>/spe_04_phenotyping.rds)
+  # used as SingleR reference for the label transfer; "" skips the transfer.
+  reference: !r Sys.getenv("MAPMET2_REFERENCE", "")
+  # Filled cluster annotation (.xlsx or .csv with columns cluster, celltype,
+  # metacluster); "" = look for cluster_annotation_BM.xlsx / .csv in the
+  # R_intermediary folders (see the annotation section).
+  annotation_file: !r Sys.getenv("MAPMET2_ANNOTATION", "")
+  # Without a filled annotation: "none" = stop after writing the annotation
+  # template (two-pass workflow); "transfer" = use the SingleR-transferred
+  # MapMetSC labels as cell types / metaclusters.
+  annotation_fallback: !r Sys.getenv("MAPMET2_ANNOTATION_FALLBACK", "none")
+  # GMM subclustering of mixed phenograph clusters, keyed to the frozen k = 30
+  # cluster IDs, e.g. list(list(cluster = "5", new = "35", markers = c("CD3_"))).
+  # Empty = no subclustering.
+  gmm_subclusters: !r list()
+  # Maximum number of reference cells per MapMetSC cell type for SingleR.
+  transfer_max_per_celltype: 5000
+---
+
+```{r setup, include=FALSE}
+# Plots directory
+plot_dir <- file.path(params$output, "plots/04_phenotyping")
+if (!dir.exists(plot_dir)) {
+  dir.create(plot_dir, recursive = TRUE)
+}
+
+# Date prefix for filenames
+date_prefix <- format(Sys.Date(), "%Y%m%d")
+
+# Helper: save a plot (ggplot, ComplexHeatmap, or base R)
+save_plot <- function(plot_obj, filename, width = 8, height = 6, dpi = 300, subdir = NULL) {
+  out_dir <- if (is.null(subdir)) plot_dir else file.path(plot_dir, subdir)
+  if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+  full_path <- file.path(out_dir, paste0(date_prefix, "_", filename))
+
+  if (inherits(plot_obj, "ggplot")) {
+    ggsave(full_path, plot = plot_obj, width = width, height = height, dpi = dpi)
+  } else if (inherits(plot_obj, "Heatmap") || inherits(plot_obj, "HeatmapList")) {
+    pdf(full_path, width = width, height = height)
+    draw(plot_obj)
+    dev.off()
+  } else {
+    # base R / already-rendered plots
+    dev.copy(pdf, full_path, width = width, height = height)
+    dev.off()
+  }
+  message("Saved: ", full_path)
+}
+
+# Global chunk options
+knitr::opts_chunk$set(
+  echo = TRUE,
+  error = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  dev = "png",
+  dpi = 300,
+  fig.width = 8,
+  fig.height = 6
+)
+```
+
+# Cell phenotyping {#phenotyping}
+In this Rmd file, we will
+
+1. run UMAP for visualization
+2. cluster cells with phenograph
+3. optionally subcluster mixed clusters with a Gaussian mixture model
+4. transfer the MapMetSC cell-type labels with SingleR (optional, as a cross-check and backup annotation)
+5. write a cluster-annotation template and annotate clusters into celltypes and metaclusters
+6. define color codes for all celltypes and metaclusters
+
+The annotation is **two-pass**. Phenograph clusters of a BM-only dataset differ from MapMetSC's, so the cluster → cell type table has to be made for MapMet2. On the first run this step writes `<output>/annotation/cluster_annotation_BM_template.xlsx` and stops after the cluster-level plots. Fill in the `celltype` and `metacluster` columns, save the file as `cluster_annotation_BM.xlsx` in `<output>/R_intermediary/` (or point `MAPMET2_ANNOTATION` to it) and run again. The phenograph clusters are frozen in `pg_clusters_BM.rds`, so the cluster IDs stay valid between the two runs. Alternatively, `annotation_fallback = "transfer"` (`MAPMET2_ANNOTATION_FALLBACK=transfer`) uses the SingleR-transferred MapMetSC labels instead.
+
+## Load libraries
+<details>
+   <summary>Load libraries</summary>
+
+```{r load-libraries}
+library(ComplexHeatmap)
+library(RColorBrewer)
+library(viridis)
+library(scater)
+library(BiocParallel)
+library(Rphenoannoy)
+library(tidyr)
+library(dittoSeq)
+library(dplyr)
+library(mclust)
+library(SingleR)
+library(circlize)
+library(readxl)
+library(ggplot2)
+library(patchwork)
+```
+</details>
+
+```{r color-code}
+# Shared colors / timepoint labels (00_MapMet_color_code.R)
+for (mapmet_cc_path in c("analysis/00_MapMet_color_code.R", "00_MapMet_color_code.R", "../analysis/00_MapMet_color_code.R"))
+  if (file.exists(mapmet_cc_path)) { source(mapmet_cc_path); break }
+
+# Folders searched for frozen intermediaries and the filled annotation
+inter_dirs <- c(Sys.getenv("MAPMET2_INTERMEDIARY", ""),
+                file.path(params$input,  "R_intermediary"),
+                file.path(dirname(params$input), "R_intermediary"),
+                file.path(params$output, "R_intermediary"))
+inter_dirs <- inter_dirs[nzchar(inter_dirs)]
+freeze_dir <- file.path(params$output, "R_intermediary")
+```
+
+## Read data
+We will first read the data that passed the [second quality control step](#qc-2) and save the count data as a matrix. Low-quality markers (low SNR in a lot of samples) as well as all IF and nuclear IMC markers will be excluded for clustering. Moreover, mean intensity will be used to represent marker expression, to average out the signals arising from lateral spillover or artifacts. As explained in [the previous chapter](#qc2-save), we are using counts measured with respect to dilated masks in downstream analysis to capture membrane signal.
+
+```{r read-data}
+spe <- readRDS(file.path(params$output,"spe_03_QC_2.rds"))
+
+# Counts matrix; keep mean-intensity channels (drop the mean-80 variants)
+intensity_mat <- assay(spe, "counts")
+colnames(intensity_mat) <- colnames(spe)
+intensity_mat <- intensity_mat[!grepl("mean-80", rownames(intensity_mat)),]
+
+# Keep only the high-quality clustering markers
+intensity_mat_hq <- intensity_mat[!grepl("PARP|IDO|DAPI|IF2_GD2|IF3_CD45_CD56|DNA|H4K12Ac|H3K9Ac|CXCR2|PNMT|Fibro|FOXP3", rownames(intensity_mat)),]
+
+# Drop cells negative for all clustering markers
+non_zeros <- as.logical(colSums(intensity_mat_hq)!=0)
+intensity_mat_hq_wo_zeros <- intensity_mat_hq[,non_zeros]
+
+spe <- spe[,non_zeros]
+rowData(spe)$use_channel <- !grepl("mean-80|PARP|IDO|DAPI|IF2_GD2|IF3_CD45_CD56|DNA|H4K12Ac|H3K9Ac|CXCR2|PNMT|Fibro|FOXP3", rownames(spe))
+
+mat <- intensity_mat_hq_wo_zeros
+
+# Timepoint as factor in display order (control, DE, T1, T2, REL)
+tp_levels <- union(intersect(TIMEPOINT_LEVELS, unique(spe$timepoint)), sort(unique(spe$timepoint)))
+col_timepoint <- complete_palette(tp_levels, COL_TIMEPOINT)
+```
+We are excluding `r length(non_zeros[non_zeros==FALSE])` more cells here, as they are negative for all markers used in downstream analysis.
+To get a first look at the single-cell data, we compute a UMAP embedding (used for visualization only).
+
+## UMAP (for visualization only)
+```{r umap}
+set.seed(221228)
+
+Sys.setenv(OMP_NUM_THREADS = 1)
+Sys.setenv(MKL_NUM_THREADS = 1)
+
+BPPARAM <- SnowParam(workers = 30, type = "SOCK", RNGseed = 221228)
+
+mat_red <- calculateUMAP(
+  mat,
+  n_neighbors = 30,
+  BPPARAM = BPPARAM
+)
+
+rownames(mat_red) <- colnames(spe)
+reducedDim(spe, "UMAP") <- mat_red
+
+p <- dittoDimPlot(spe, var = "fm_id",
+             reduction.use = "UMAP", size = 1,
+             do.label = TRUE,
+             legend.show=F) +
+  theme(legend.title = element_blank()) +
+  ggtitle("Sample ID on UMAP")
+
+save_plot(p, "UMAP-vis-sampleID.pdf", width = 8, height = 6)
+
+p
+
+```
+
+The same UMAP colored by timepoint shows whether cells of the BM controls, diagnosis, treatment and relapse samples overlap.
+
+```{r umap-timepoint}
+spe$timepoint_plot <- factor(spe$timepoint, levels = tp_levels)
+
+p_tp <- dittoDimPlot(spe, var = "timepoint_plot",
+             reduction.use = "UMAP", size = 0.3,
+             order = "randomize",
+             color.panel = unname(col_timepoint[tp_levels]),
+             legend.show = TRUE) +
+  theme(legend.title = element_blank(), aspect.ratio = 1) +
+  ggtitle("Timepoint on UMAP")
+
+save_plot(p_tp, "UMAP-vis-timepoint.pdf", width = 10, height = 8)
+
+p_tp
+```
+
+# UMAPs for each marker
+```{r UMAP-all-markers, fig.width=24, fig.height=32}
+excluded_markers <- "mean-80|PARP|IDO|DAPI|IF2_GD2|IF3_CD45_CD56|DNA|H4K12Ac|H3K9Ac|CXCR2|PNMT|Fibro|FOXP3"
+max_cells_for_umap <- 20000
+
+marker_vars <- rownames(spe)[
+  !grepl(excluded_markers, rownames(spe))
+]
+
+set.seed(221228)
+marker_umap_ncells <- min(max_cells_for_umap, ncol(spe))
+marker_umap_idx <- sample(seq_len(ncol(spe)), marker_umap_ncells)
+spe_umap_markers <- spe[, marker_umap_idx]
+
+p_markers <- multi_dittoDimPlot(
+  spe_umap_markers,
+  vars = marker_vars,
+  reduction.use = "UMAP",
+  size = 0.5,
+  ncol = 5,
+  color.panel = viridis(100, direction = -1)
+)
+
+save_plot(p_markers, "UMAP-all-markers.pdf", width = 24, height = 32)
+p_markers
+```
+
+## Phenograph clustering and marker bubble plot
+We source the shared bubble-plot helper, cluster the cells with phenograph (k = 30), and summarise each cluster in a bubble plot where dot colour encodes scaled marker expression and dot size the fraction of cells expressing the marker. The barplots on top give the number of cells per cluster for each timepoint (control BM, DE, T1, T2, REL); clusters absent from the control samples are candidate tumor clusters.
+
+```{r vis-data-bubbleplot}
+# Shared bubble-plot helper.
+source(if (file.exists("code/bubbleplot.R")) "code/bubbleplot.R" else "../code/bubbleplot.R",
+       local = TRUE)   # local=TRUE so the helper sees spe/mat
+```
+
+```{r phenograph-umap-bubbleplot}
+set.seed(221228)
+
+k <- 30
+
+# Phenograph (k = 30) is not bit-reproducible across machines, so load a frozen
+# labelling from R_intermediary when present, else cluster here and save it.
+pg_name <- "pg_clusters_BM.rds"
+pg_file <- Find(file.exists, file.path(inter_dirs, pg_name))
+
+if (!is.null(pg_file)) {
+  pg <- readRDS(pg_file)
+  if (!all(colnames(spe) %in% names(pg)))
+    stop("Frozen clustering ", pg_file, " does not cover all cells (the QC steps changed ",
+         "the cell set). Delete it to re-cluster - the cluster IDs then change, so the ",
+         "cluster annotation has to be redone as well.")
+  lab <- as.integer(pg[colnames(spe)])
+  spe$pg_clusters <- factor(lab, levels = sort(unique(lab)))
+  message("Loaded frozen phenograph clustering: ", pg_file)
+} else {
+  Rphenograph_out <- Rphenoannoy(t(mat), k = k)
+  spe$pg_clusters <- factor(membership(Rphenograph_out[[2]]))
+  dir.create(freeze_dir, showWarnings = FALSE, recursive = TRUE)
+  saveRDS(setNames(as.character(spe$pg_clusters), colnames(spe)),
+          file.path(freeze_dir, pg_name))
+  message("Saved frozen phenograph clustering: ", file.path(freeze_dir, pg_name))
+}
+# k = 30 labels before GMM subclustering (what pg_clusters_BM.rds stores)
+spe$pg_clusters_k30 <- as.character(spe$pg_clusters)
+
+# Cluster colours (helpers from bubbleplot.R)
+if (is.null(metadata(spe)$color_vectors)) {
+  metadata(spe)$color_vectors <- list()
+}
+cluster_levels <- get_cluster_levels(spe$pg_clusters)
+color_key <- "col_pg_clusters"
+if (is.null(metadata(spe)$color_vectors[[color_key]]) ||
+    !all(cluster_levels %in% names(metadata(spe)$color_vectors[[color_key]]))) {
+  metadata(spe)$color_vectors[[color_key]] <- generate_cluster_colors(
+    cluster_levels = cluster_levels
+  )
+}
+col_clusters <- metadata(spe)$color_vectors[[color_key]][cluster_levels]
+
+# UMAP coloured by pg_clusters
+p <- dittoDimPlot(
+  spe, var = "pg_clusters", reduction.use = "UMAP",
+  size = 0.5, do.label = TRUE, legend.show = FALSE,
+  color.panel = col_clusters
+) +
+  theme(legend.title = element_blank()) +
+  ggtitle("pg_clusters (k = 30) on UMAP")
+
+label_layer <- which(
+  sapply(p$layers, function(x) class(x$geom)[1]) %in% c("GeomLabelRepel", "GeomLabel")
+)
+label_data <- layer_data(p, label_layer)
+label_fills <- col_clusters[as.character(label_data$label)]
+p$layers[[label_layer]]$aes_params$fill <- label_fills
+p$layers[[label_layer]]$aes_params$colour <- "black"
+
+save_plot(p, "umap_pg_clusters.pdf", width = 8, height = 6)
+print(p)
+
+# Bubble plot for pg_clusters (cell counts per timepoint on top)
+plot_cluster_bubble(
+  cluster_col = "pg_clusters",
+  save_name = "bubbleplot_pg_clusters.pdf",
+  group_col = "timepoint",
+  group_colors = col_timepoint,
+  ncells_break_at = 100000
+)
+```
+
+## Clustered heatmaps for each cluster before subclustering
+
+Single-cell heatmaps (up to 8000 random cells per cluster) of the phenograph
+clusters before the optional GMM subclustering.
+
+```{r heatmaps-before-subclustering}
+genes_use <- rownames(spe)[!grepl("-80|PARP|IDO|IF2_GD2|IF3_CD45_CD56|DAPI|DNA|H4K12Ac|H3K9Ac|CXCR2|PNMT|Fibro|FOXP3", rownames(spe))]
+
+set.seed(221228)
+for (cl in as.character(unique(spe$pg_clusters))) {
+
+  spe_cl <- spe[, as.character(spe$pg_clusters) == cl]
+
+  # skip empty clusters
+  if (ncol(spe_cl) == 0) next
+
+  n_cells <- min(8000, ncol(spe_cl))
+  rand_cells <- sample(seq_len(ncol(spe_cl)), n_cells)
+
+  p1 <- dittoHeatmap(
+    spe_cl[, rand_cells],
+    genes = genes_use,
+    cluster_cols = TRUE,
+    scaled.to.max = TRUE,
+    heatmap.colors.max.scaled = viridis(100)
+  )
+
+  save_plot(
+    p1,
+    paste0("heatmap_before_subclustering_", cl, ".pdf"),
+    width = 14,
+    height = 6,
+    subdir = "heatmap_before_subclustering"
+  )
+}
+```
+
+## Subclustering of mixed clusters using GMM
+
+Phenograph clusters that mix two cell types (e.g. CD3+ and CD3- cells) can be split into two components by a Gaussian mixture model on selected markers. The clusters to split are set in `params$gmm_subclusters` (keyed to the frozen k = 30 cluster IDs, so they can only be chosen after a first run); each entry gives the cluster, the ID of its second component and the markers (channel-name prefixes) used for the split.
+
+```{r gmm-subclustering}
+set.seed(221228)
+
+# character, for reassignment below
+spe$pg_clusters <- as.character(spe$pg_clusters)
+
+subclusters <- params$gmm_subclusters
+for (sc in subclusters) {
+  if (is.null(sc$cluster) || is.null(sc$new))
+    stop("Each params$gmm_subclusters entry needs `cluster` and `new` (and optional `markers`).")
+  cl     <- as.character(sc$cluster)
+  new_cl <- as.character(sc$new)
+  if (new_cl %in% spe$pg_clusters)
+    stop("GMM subcluster ID ", new_cl, " already exists among the phenograph clusters.")
+
+  idx <- which(spe$pg_clusters == cl)
+  if (length(idx) < 4) {
+    message("Cluster ", cl, " has < 4 cells - not subclustered.")
+    next
+  }
+
+  sub_mat <- t(mat[, idx])  # cells x markers
+
+  # select cluster-specific markers
+  if (length(sc$markers)) {
+    keep_cols <- grep(paste0("^(", paste(sc$markers, collapse="|"), ")"), colnames(sub_mat))
+    sub_mat <- sub_mat[, keep_cols, drop = FALSE]
+  }
+
+  # clean data
+  sub_mat <- sub_mat[complete.cases(sub_mat), , drop = FALSE]
+  sub_mat <- sub_mat[, apply(sub_mat, 2, var) > 0, drop = FALSE]
+
+  sub_mat <- scale(sub_mat)
+
+  gmm_fit <- tryCatch(
+    Mclust(sub_mat, G = 2, verbose = FALSE),
+    error = function(e) NULL
+  )
+
+  if (is.null(gmm_fit)) {
+    message("GMM failed for cluster ", cl, " - not subclustered.")
+    next
+  }
+
+  comp2 <- which(gmm_fit$classification == 2)
+  spe$pg_clusters[idx[comp2]] <- new_cl
+  message("Cluster ", cl, ": ", length(comp2), " of ", length(idx), " cells moved to ", new_cl)
+}
+
+# Regenerate colours for the post-subclustering levels once and store them on
+# spe, so the subcluster heatmaps, the bubble plot (which reuses
+# metadata(spe)$color_vectors) and the UMAP below share the same
+# cluster -> colour mapping.
+cluster_levels_after <- get_cluster_levels(spe$pg_clusters)
+col_clusters_after   <- generate_cluster_colors(cluster_levels = cluster_levels_after)[cluster_levels_after]
+metadata(spe)$color_vectors$col_pg_clusters <- col_clusters_after
+```
+
+## Single-cell heatmaps for subclustered clusters
+
+```{r subcluster-heatmaps}
+# original/new subcluster pairs
+subcluster_pairs <- lapply(subclusters, function(sc)
+  list(orig = as.character(sc$cluster), new = as.character(sc$new)))
+
+set.seed(221228)
+for (pair in subcluster_pairs) {
+  orig_cl <- pair$orig
+  new_cl  <- pair$new
+
+  # cells in either subcluster
+  idx <- which(spe$pg_clusters %in% c(orig_cl, new_cl))
+
+  if (length(idx) == 0) next
+
+  n_cells   <- min(8000, length(idx))
+  rand_idx  <- sample(idx, n_cells)
+
+  spe_cl <- spe[, rand_idx]
+
+  # factor with just the two subclusters, so annot.colors (applied by dittoHeatmap
+  # in level order) uses the post-subclustering UMAP/bubble plot colours
+  pair_levels <- intersect(c(orig_cl, new_cl), unique(spe_cl$pg_clusters))
+  spe_cl$pg_clusters <- factor(spe_cl$pg_clusters, levels = pair_levels)
+
+  # order cells by subcluster (groups side-by-side)
+  cell_order <- order(spe_cl$pg_clusters)
+
+  p1 <- dittoHeatmap(
+    spe_cl[, cell_order],
+    genes          = genes_use,
+    cluster_cols   = FALSE,          # keep our column order
+    scaled.to.max  = TRUE,
+    heatmap.colors.max.scaled = viridis(100),
+    annot.by       = "pg_clusters",
+    annot.colors   = unname(col_clusters_after[pair_levels])
+  )
+
+  save_plot(
+    p1,
+    paste0("heatmap_subcluster_", orig_cl, "_", new_cl, ".pdf"),
+    width  = 14,
+    height = 6
+  )
+}
+```
+
+```{r pg-clusters-final-bubbleplot}
+
+# Bubble plot after subclustering (distinct filename).
+plot_cluster_bubble(
+      cluster_col = "pg_clusters",
+      group_col = "timepoint",
+      group_colors = col_timepoint,
+      ncells_break_at = 100000,
+      save_name = "bubbleplot_pg_clusters_after_subclustering.pdf")
+
+# UMAP after subclustering; fix the factor level order so the colour panel
+# lines up.
+spe$pg_clusters_after_plot <- factor(as.character(spe$pg_clusters), levels = cluster_levels_after)
+
+p_after <- dittoDimPlot(
+  spe, var = "pg_clusters_after_plot", reduction.use = "UMAP",
+  size = 0.5, do.label = TRUE, legend.show = FALSE,
+  color.panel = col_clusters_after
+) +
+  theme(legend.title = element_blank()) +
+  ggtitle("pg_clusters after subclustering on UMAP")
+
+label_layer <- which(
+  sapply(p_after$layers, function(x) class(x$geom)[1]) %in% c("GeomLabelRepel", "GeomLabel")
+)
+label_data  <- layer_data(p_after, label_layer)
+label_fills <- col_clusters_after[as.character(label_data$label)]
+p_after$layers[[label_layer]]$aes_params$fill   <- label_fills
+p_after$layers[[label_layer]]$aes_params$colour <- "black"
+
+save_plot(p_after, "umap_pg_clusters_after_subclustering.pdf", width = 8, height = 6)
+print(p_after)
+
+```
+
+## Clustered heatmaps for each cluster
+
+```{r heatmaps-after-subclustering}
+clusters <- unique(colData(spe)$pg_clusters)
+
+for (cl in clusters) {
+
+  spe_cl <- spe[, colData(spe)$pg_clusters == cl]
+
+  # skip empty clusters
+  if (ncol(spe_cl) == 0) next
+
+  n_cells <- min(8000, ncol(spe_cl))
+  rand_cells <- sample(seq_len(ncol(spe_cl)), n_cells)
+
+  p1 <- dittoHeatmap(
+    spe_cl[, rand_cells],
+    genes = genes_use,
+    cluster_cols = TRUE,
+    scaled.to.max = TRUE,
+    heatmap.colors.max.scaled = viridis(100)
+  )
+
+  save_plot(
+    p1,
+    paste0("heatmap_after_subclustering_", cl, ".pdf"),
+    width = 14,
+    height = 6,
+    subdir = "heatmap_after_subclustering"
+  )
+}
+
+```
+
+## Label transfer from MapMetSC (SingleR)
+
+As a cross-check of the manual annotation and as a backup annotation, we transfer the MapMetSC cell-type labels onto the MapMet2 cells with [SingleR](https://bioconductor.org/packages/SingleR), using MapMetSC's annotated object (primary tumors + control BM) as reference, as MapMetSC itself does for the adrenal-gland comparison (`06.1_correlation_AD.Rmd`). Both datasets share the same panel and preprocessing, so the transfer uses the shared clustering channels (`use_channel`). The reference is subsampled to at most `params$transfer_max_per_celltype` cells per cell type. Metaclusters follow from the MapMetSC cell type → metacluster mapping. The result is cached in `<output>/R_intermediary/celltype_transfer_BM.rds` and reused when the reference and the cells are unchanged. This step is skipped when no reference is given.
+
+```{r label-transfer, fig.width=12, fig.height=8}
+ref_path <- params$reference
+transfer_ok <- FALSE
+
+if (!nzchar(ref_path)) {
+  message("No reference given (params$reference / MAPMET2_REFERENCE): label transfer skipped.")
+} else if (!file.exists(ref_path)) {
+  message("Reference not found: ", ref_path, " - label transfer skipped.")
+} else if (normalizePath(ref_path) ==
+           normalizePath(file.path(params$output, "spe_04_phenotyping.rds"), mustWork = FALSE)) {
+  stop("params$reference points at MapMet2's own spe_04_phenotyping.rds; ",
+       "use MapMetSC's annotated object as reference.")
+} else {
+  cache_file <- file.path(freeze_dir, "celltype_transfer_BM.rds")
+  cache <- if (file.exists(cache_file)) readRDS(cache_file) else NULL
+  cache_valid <- !is.null(cache) &&
+    identical(attr(cache, "reference"), normalizePath(ref_path)) &&
+    identical(attr(cache, "reference_mtime"), as.character(file.mtime(ref_path))) &&
+    identical(as.numeric(attr(cache, "max_per_celltype")), as.numeric(params$transfer_max_per_celltype)) &&
+    all(colnames(spe) %in% rownames(cache))
+
+  if (cache_valid) {
+    message("Loaded cached label transfer: ", cache_file)
+    transfer <- cache[colnames(spe), , drop = FALSE]
+  } else {
+    ref <- readRDS(ref_path)
+    if (!all(c("celltype", "metacluster") %in% colnames(colData(ref))))
+      stop("Reference ", ref_path, " has no celltype / metacluster annotation.")
+
+    # Shared clustering channels
+    ref_use  <- if ("use_channel" %in% colnames(rowData(ref))) rownames(ref)[rowData(ref)$use_channel] else rownames(ref)
+    channels <- intersect(rownames(spe)[rowData(spe)$use_channel], ref_use)
+    message(length(channels), " shared channels used for the label transfer.")
+
+    # Balanced reference subsample per MapMetSC cell type
+    set.seed(221228)
+    by_type <- split(seq_len(ncol(ref)), as.character(ref$celltype))
+    ref_idx <- unlist(lapply(by_type, function(i)
+      if (length(i) > params$transfer_max_per_celltype) sample(i, params$transfer_max_per_celltype) else i),
+      use.names = FALSE)
+
+    ref_mat <- as.matrix(assay(ref, "counts")[channels, ref_idx])
+    ref_lab <- as.character(ref$celltype[ref_idx])
+    # MapMetSC cell type -> (majority) metacluster
+    ct2meta <- tapply(as.character(ref$metacluster), as.character(ref$celltype),
+                      function(x) names(sort(table(x), decreasing = TRUE))[1])
+
+    pred <- SingleR(test = as.matrix(assay(spe, "counts")[channels, ]), ref = ref_mat,
+                    labels = ref_lab,
+                    BPPARAM = MulticoreParam(workers = 10, RNGseed = 20231030))
+
+    transfer <- data.frame(
+      celltype_transfer        = pred$labels,
+      celltype_transfer_pruned = pred$pruned.labels,
+      metacluster_transfer     = unname(ct2meta[pred$labels]),
+      row.names = colnames(spe), stringsAsFactors = FALSE
+    )
+
+    # Held-out check on cells present in both datasets (the control BM samples):
+    # agreement with their MapMetSC label, excluding cells used as reference.
+    shared <- setdiff(intersect(colnames(spe), colnames(ref)), colnames(ref)[ref_idx])
+    attr(transfer, "shared_truth") <- setNames(as.character(ref[, shared]$celltype), shared)
+
+    attr(transfer, "reference")        <- normalizePath(ref_path)
+    attr(transfer, "reference_mtime")  <- as.character(file.mtime(ref_path))
+    attr(transfer, "max_per_celltype") <- params$transfer_max_per_celltype
+    dir.create(freeze_dir, showWarnings = FALSE, recursive = TRUE)
+    saveRDS(transfer, cache_file)
+    message("Saved label transfer: ", cache_file)
+    rm(ref, ref_mat); invisible(gc())
+  }
+
+  spe$celltype_transfer        <- transfer$celltype_transfer
+  spe$celltype_transfer_pruned <- transfer$celltype_transfer_pruned
+  spe$metacluster_transfer     <- transfer$metacluster_transfer
+  transfer_ok <- TRUE
+
+  # Agreement on held-out shared cells (control BM, also annotated in MapMetSC).
+  # Row-subsetting drops attributes, so read them from the full cached table.
+  truth <- attr(if (cache_valid) cache else transfer, "shared_truth")
+  truth <- truth[names(truth) %in% colnames(spe)]
+  if (length(truth)) {
+    pred_shared <- spe[, names(truth)]$celltype_transfer
+    message(sprintf("Label transfer vs MapMetSC labels on %d held-out shared (control BM) cells: %.1f%% agreement.",
+                    length(truth), 100 * mean(pred_shared == truth)))
+    conf <- as.data.frame(table(MapMetSC = truth, transferred = pred_shared)) %>%
+      group_by(MapMetSC) %>% mutate(pct = 100 * Freq / sum(Freq)) %>% ungroup()
+    p_conf <- ggplot(conf, aes(transferred, MapMetSC, fill = pct)) +
+      geom_tile() +
+      scale_fill_viridis_c(name = "% of row") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+      labs(title = "Label transfer on held-out shared control BM cells",
+           x = "transferred label (SingleR)", y = "MapMetSC label")
+    save_plot(p_conf, "label_transfer_agreement_shared_cells.pdf", width = 10, height = 8)
+    print(p_conf)
+  }
+
+  # Transferred cell types on the UMAP
+  col_transfer <- complete_palette(spe$celltype_transfer, COL_CELLTYPE)
+  p_tr <- dittoDimPlot(spe, var = "celltype_transfer",
+               reduction.use = "UMAP", size = 0.3,
+               order = "randomize",
+               color.panel = unname(col_transfer[sort(unique(spe$celltype_transfer))]),
+               legend.show = TRUE) +
+    theme(legend.title = element_blank(), aspect.ratio = 1) +
+    ggtitle("Transferred MapMetSC cell types (SingleR) on UMAP")
+  save_plot(p_tr, "umap-celltype-transfer.pdf", width = 16, height = 8)
+  print(p_tr)
+
+  # Composition of each phenograph cluster in transferred cell types
+  comp <- as.data.frame(table(cluster = spe$pg_clusters, transferred = spe$celltype_transfer)) %>%
+    group_by(cluster) %>% mutate(pct = 100 * Freq / sum(Freq)) %>% ungroup() %>%
+    mutate(cluster = factor(cluster, levels = cluster_levels_after))
+  p_comp <- ggplot(comp, aes(transferred, cluster, fill = pct)) +
+    geom_tile() +
+    scale_fill_viridis_c(name = "% of cluster") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(title = "Transferred MapMetSC cell types per phenograph cluster",
+         x = "transferred label (SingleR)", y = "phenograph cluster")
+  save_plot(p_comp, "label_transfer_per_cluster.pdf", width = 12, height = 10)
+  print(p_comp)
+}
+```
+
+## Cluster annotation template
+
+Each run writes an annotation template with one row per (sub)cluster: its cell counts per timepoint, the percentage of each timepoint within the cluster and - when the label transfer ran - the most frequent transferred MapMetSC cell type and metacluster with their share of the cluster. The `celltype`, `metacluster` and `comments` columns are left empty for the manual annotation, which is made from the bubble plots, the heatmaps above, images and literature. Use the MapMetSC metacluster names where they apply (`tumor`, `T cells`, `granulocytes`, `myeloid/NK`, `B cells`, `mesenchymal`, `proliferating cells`, `progenitors`, `other`): the correlation steps use `tumor` and `other`.
+
+```{r annotation-template}
+cluster_ids <- get_cluster_levels(spe$pg_clusters)
+
+counts <- as.data.frame.matrix(table(factor(spe$pg_clusters, levels = cluster_ids),
+                                     factor(spe$timepoint, levels = tp_levels)))
+template <- data.frame(cluster = cluster_ids, n_total = rowSums(counts), check.names = FALSE)
+template <- cbind(template, setNames(counts, paste0("n_", colnames(counts))))
+pct <- round(100 * counts / pmax(rowSums(counts), 1), 1)
+template <- cbind(template, setNames(pct, paste0("pct_", colnames(pct))))
+
+if (transfer_ok) {
+  top_label <- function(lab) {
+    tab <- as.data.frame(table(cluster = spe$pg_clusters, label = lab)) %>%
+      group_by(cluster) %>% mutate(frac = Freq / sum(Freq)) %>%
+      slice_max(frac, n = 1, with_ties = FALSE) %>% ungroup()
+    tab[match(cluster_ids, tab$cluster), ]
+  }
+  top_ct   <- top_label(spe$celltype_transfer)
+  top_meta <- top_label(spe$metacluster_transfer)
+  template$transfer_celltype         <- as.character(top_ct$label)
+  template$transfer_celltype_pct     <- round(100 * top_ct$frac, 1)
+  template$transfer_metacluster      <- as.character(top_meta$label)
+  template$transfer_metacluster_pct  <- round(100 * top_meta$frac, 1)
+}
+template$celltype    <- ""
+template$metacluster <- ""
+template$comments    <- ""
+
+template_dir <- file.path(params$output, "annotation")
+dir.create(template_dir, showWarnings = FALSE, recursive = TRUE)
+if (requireNamespace("writexl", quietly = TRUE)) {
+  instructions <- data.frame(instructions = c(
+    "Fill in celltype and metacluster for every cluster in the 'annotation' sheet.",
+    "Save the file as cluster_annotation_BM.xlsx in <output>/R_intermediary/ (or set MAPMET2_ANNOTATION).",
+    "Cluster IDs refer to the frozen phenograph clustering pg_clusters_BM.rds (+ GMM subclusters).",
+    "Use the MapMetSC metacluster names where they apply; 'tumor' and 'other' are used by the correlation steps.",
+    "transfer_* columns: most frequent SingleR-transferred MapMetSC label and its % of the cluster."))
+  template_file <- file.path(template_dir, "cluster_annotation_BM_template.xlsx")
+  writexl::write_xlsx(list(annotation = template, instructions = instructions), template_file)
+} else {
+  template_file <- file.path(template_dir, "cluster_annotation_BM_template.csv")
+  write.csv(template, template_file, row.names = FALSE)
+}
+message("Wrote annotation template: ", template_file)
+
+knitr::kable(head(template[, c("cluster", "n_total", grep("^pct_", colnames(template), value = TRUE),
+                               intersect(c("transfer_celltype", "transfer_celltype_pct"), colnames(template)))],
+                  50), row.names = FALSE)
+```
+
+## Annotation and merging of clusters
+
+Next, we read the filled cluster annotation (columns `cluster`, `celltype` and `metacluster`). It is taken from `params$annotation_file` (`MAPMET2_ANNOTATION`) or, if that is empty, from the first `cluster_annotation_BM.xlsx` / `.csv` found in `MAPMET2_INTERMEDIARY`, `<input>/R_intermediary`, `<input>/../R_intermediary` or `<output>/R_intermediary`. Without a filled annotation the step either stops here (default) or uses the transferred labels (`annotation_fallback = "transfer"`).
+
+```{r annotations-celltypes}
+annotation_fallback <- if (nzchar(params$annotation_fallback)) params$annotation_fallback else "none"
+annotation_fallback <- match.arg(annotation_fallback, c("none", "transfer"))
+
+ann_file <- if (nzchar(params$annotation_file)) {
+  if (!file.exists(params$annotation_file))
+    stop("params$annotation_file not found: ", params$annotation_file)
+  params$annotation_file
+} else {
+  Find(file.exists, unlist(lapply(inter_dirs, function(d)
+    file.path(d, c("cluster_annotation_BM.xlsx", "cluster_annotation_BM.csv")))))
+}
+
+read_annotation <- function(f) {
+  a <- if (grepl("\\.xlsx?$", f, ignore.case = TRUE)) {
+    sheets <- readxl::excel_sheets(f)
+    readxl::read_excel(f, sheet = if ("annotation" %in% sheets) "annotation" else 1)
+  } else {
+    utils::read.csv(f, check.names = FALSE, stringsAsFactors = FALSE)
+  }
+  a <- as.data.frame(a)
+  missing_cols <- setdiff(c("cluster", "celltype", "metacluster"), colnames(a))
+  if (length(missing_cols))
+    stop("Annotation ", f, " lacks column(s): ", paste(missing_cols, collapse = ", "))
+  a$cluster     <- trimws(as.character(a$cluster))
+  a$celltype    <- trimws(as.character(a$celltype))
+  a$metacluster <- trimws(as.character(a$metacluster))
+  a
+}
+
+if (!is.null(ann_file)) {
+  annotation <- read_annotation(ann_file)
+  dup <- unique(annotation$cluster[duplicated(annotation$cluster)])
+  if (length(dup)) stop("Duplicated cluster(s) in ", ann_file, ": ", paste(dup, collapse = ", "))
+  not_annotated <- setdiff(cluster_ids, annotation$cluster)
+  incomplete <- annotation$cluster[annotation$cluster %in% cluster_ids &
+                                   (is.na(annotation$celltype) | annotation$celltype == "" |
+                                    is.na(annotation$metacluster) | annotation$metacluster == "")]
+  if (length(not_annotated) || length(incomplete))
+    stop("Annotation ", ann_file, " is incomplete.",
+         if (length(not_annotated)) paste0(" Missing cluster(s): ", paste(not_annotated, collapse = ", "), "."),
+         if (length(incomplete)) paste0(" Empty celltype/metacluster for cluster(s): ", paste(incomplete, collapse = ", "), "."),
+         " Compare with the template ", template_file, ".")
+  extra <- setdiff(annotation$cluster, cluster_ids)
+  if (length(extra)) message("Ignoring annotation rows for clusters not in the data: ",
+                             paste(extra, collapse = ", "))
+
+  spe$celltype    <- unname(setNames(annotation$celltype,    annotation$cluster)[spe$pg_clusters])
+  spe$metacluster <- unname(setNames(annotation$metacluster, annotation$cluster)[spe$pg_clusters])
+  annotation_source <- paste0("manual (", ann_file, ")")
+} else if (annotation_fallback == "transfer" && transfer_ok) {
+  spe$celltype    <- spe$celltype_transfer
+  spe$metacluster <- spe$metacluster_transfer
+  annotation_source <- "SingleR label transfer from MapMetSC"
+} else {
+  annotation_source <- NA_character_
+}
+```
+
+```{r annotation-pending, eval = exists("annotation_source") && is.na(annotation_source)}
+# First pass: no annotation yet. Keep the clustered object for inspection, then
+# stop rendering here (run_analysis.R skips the downstream steps).
+saveRDS(spe, file.path(params$output, "spe_04_phenotyping_clusters.rds"))
+message("\n*** Cluster annotation pending ***\n",
+        "Fill in ", template_file, " and save it as\n  ",
+        file.path(freeze_dir, "cluster_annotation_BM.xlsx"), "\n",
+        "(or set MAPMET2_ANNOTATION), then run again",
+        if (transfer_ok) "; or use the transferred labels with MAPMET2_ANNOTATION_FALLBACK=transfer" else "",
+        ".\nThe clustered (unannotated) object was saved as spe_04_phenotyping_clusters.rds.")
+knitr::knit_exit()
+```
+
+Cell types and metaclusters are now assigned (source: `r annotation_source`).
+
+## Assign colors
+Finally, we assign colors to all celltypes and metaclusters. Names that are also MapMetSC cell types / metaclusters keep the MapMetSC colors (`00_MapMet_color_code.R`); new names get a fixed color from the shared qualitative palette.
+
+```{r colors-celltypes}
+metadata(spe)$annotation_source <- annotation_source
+
+col_celltype <- complete_palette(spe$celltype, COL_CELLTYPE)
+metadata(spe)$color_vectors$col_celltype <- col_celltype
+```
+
+```{r colors-metaclusters}
+col_metacluster <- complete_palette(spe$metacluster, COL_METACLUSTER)
+metadata(spe)$color_vectors$col_metacluster <- col_metacluster
+metadata(spe)$color_vectors$col_timepoint   <- col_timepoint
+```
+
+## Visualizations
+For visualization purpose, we give the celltypes a meaningful order. If a `celltype_order_BM.csv` (`;`-separated, columns `order;celltype`, as MapMetSC's `celltype_order.csv`) is found in the R_intermediary folders or `params$input`, it sets the order; otherwise celltypes are ordered by metacluster (MapMetSC metacluster order) and then alphabetically.
+
+```{r order-celltypes}
+strip_order_prefix <- function(x) sub("^[0-9]+_", "", x)
+
+order_file <- Find(file.exists, file.path(c(inter_dirs, params$input), "celltype_order_BM.csv"))
+if (!is.null(order_file)) {
+  clusternames_ordered <- read.csv(order_file, sep=";", colClasses = c("order" = "character"))
+  codes <- setNames(paste0(clusternames_ordered$order, "_", clusternames_ordered$celltype), clusternames_ordered$celltype)
+  # The "NN_" prefix imposes display order via alphabetical sort
+  celltype_prefixed <- recode(spe$celltype, !!!codes)            # e.g. "01_CD44+ Tu"
+  ordered_levels    <- strip_order_prefix(sort(unique(celltype_prefixed)))
+  message("Celltype order from ", order_file)
+} else {
+  ct_meta <- as.data.frame(colData(spe)) %>%
+    count(celltype, metacluster) %>%
+    group_by(celltype) %>% slice_max(n, n = 1, with_ties = FALSE) %>% ungroup()
+  meta_order <- c(intersect(names(COL_METACLUSTER), ct_meta$metacluster),
+                  sort(setdiff(ct_meta$metacluster, names(COL_METACLUSTER))))
+  ordered_levels <- ct_meta$celltype[order(match(ct_meta$metacluster, meta_order), ct_meta$celltype)]
+}
+spe$celltype_ordered <- factor(spe$celltype, levels = ordered_levels)
+
+# col_celltype is keyed by the same (unprefixed) names, so reuse it.
+metadata(spe)$color_vectors$col_celltype_ordered <- metadata(spe)$color_vectors$col_celltype
+```
+
+As a last step, we generate UMAP and bubble plots for the final celltypes/metaclusters.
+
+```{r bubbleplot-celltypes, fig.width=16, fig.height=14}
+
+plot_cluster_bubble(
+  cluster_col = "celltype",
+  save_name = "bubbleplot-celltypes.pdf",
+  annotation_level = "metacluster",
+  group_col = "timepoint",
+  group_colors = col_timepoint,
+  ncells_break_at = 65000,
+  plot_width      = 13,
+  plot_height     = 11.5
+)
+
+```
+
+```{r umap-final-celltypes, fig.width=10}
+# aspect.ratio = 1 keeps the UMAP panel square regardless of legend width.
+p1 <- dittoDimPlot(spe, var = "celltype_ordered",
+             reduction.use = "UMAP", size = 0.3,
+             do.label = F,
+             order = "randomize",
+             legend.show=T) +
+  scale_color_manual(values = metadata(spe)$color_vectors$col_celltype_ordered) +
+  theme(legend.title = element_blank(), aspect.ratio = 1) +
+  ggtitle("Celltypes on UMAP")
+
+save_plot(p1, "umap-celltypes.pdf", width = 16, height = 8)
+
+p1
+```
+
+We also plot the same celltype UMAP split by timepoint (control BM, DE, T1, T2, REL).
+
+```{r umap-celltypes-by-timepoint, fig.width=16, fig.height=10}
+p1_tp <- dittoDimPlot(spe, var = "celltype_ordered",
+             reduction.use = "UMAP", size = 0.3,
+             split.by = "timepoint_plot",
+             do.label = F,
+             order = "randomize",
+             legend.show=T) +
+  scale_color_manual(values = metadata(spe)$color_vectors$col_celltype_ordered) +
+  theme(legend.title = element_blank(), aspect.ratio = 1) +
+  ggtitle("Celltypes on UMAP per timepoint")
+
+save_plot(p1_tp, "umap-celltypes-by-timepoint.pdf", width = 20, height = 12)
+
+p1_tp
+```
+
+```{r vis-metacluster}
+p2 <- dittoDimPlot(spe, var = "metacluster",
+             reduction.use = "UMAP", size = 0.3, labels.size=4,
+             do.label = F,
+             order = "randomize",
+             legend.show=T) +
+  scale_color_manual(values = metadata(spe)$color_vectors$col_metacluster) +
+  theme(legend.title = element_blank(), aspect.ratio = 1) +
+  ggtitle("Metaclusters on UMAP")
+
+save_plot(p2, "umap-metaclusters.pdf", width = 13, height = 8)
+
+p2
+```
+
+Finally, we plot a validation heatmap of the cells in each celltype.
+
+```{r heatmaps-celltypes}
+# celltypes to iterate over
+clusters <- unique(colData(spe)$celltype)
+
+for (cl in clusters) {
+
+  # safe filename from celltype
+  safe_name <- cl
+  safe_name <- gsub("\\+", "plus", safe_name)
+  safe_name <- gsub("-", "minus", safe_name)
+  safe_name <- gsub("[^A-Za-z0-9_]", "_", safe_name)
+
+  spe_cl <- spe[, colData(spe)$celltype == cl]
+
+  # skip empty celltypes
+  if (ncol(spe_cl) == 0) next
+
+  n_cells <- min(8000, ncol(spe_cl))
+  rand_cells <- sample(seq_len(ncol(spe_cl)), n_cells)
+
+  p1 <- dittoHeatmap(
+    spe_cl[, rand_cells],
+    genes = genes_use,
+    cluster_cols = TRUE,
+    scaled.to.max = TRUE,
+    heatmap.colors.max.scaled = viridis(100)
+  )
+
+  filename <- paste0("heatmap_celltype_", safe_name, ".pdf")
+  save_plot(p1, filename = filename, width = 14, height = 6, subdir = "heatmap_celltype")
+}
+```
+## Save object
+
+```{r save-objects}
+
+saveRDS(spe, file.path(params$output, "spe_04_phenotyping.rds"))
+
+```
+
+## Session Info
+
+<details>
+   <summary>SessionInfo</summary>
+
+```{r, echo = FALSE}
+sessionInfo()
+```
+</details>

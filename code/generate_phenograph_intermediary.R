@@ -1,0 +1,58 @@
+#!/usr/bin/env Rscript
+# =============================================================================
+# Extract frozen phenograph outputs from existing MapMet2 SPE objects
+# (adapted from MapMetSC's code/generate_phenograph_intermediary.R).
+#
+# Phenograph (Annoy kNN + igraph Louvain) is not bit-reproducible across
+# machines, so the notebooks load a frozen kept-cell list (02_QC_1) and frozen
+# k=30 cluster labels (04_phenotyping) instead of re-clustering. MapMet2's 02
+# and 04 already write these to <output>/R_intermediary/ on their first run;
+# this script re-extracts them from the saved objects, e.g. to ship them with
+# the data (params$input/R_intermediary/) or after copying objects around.
+#
+# Produces: kept_cells_BM.rds, pg_clusters_BM.rds
+# =============================================================================
+
+suppressPackageStartupMessages(library(SpatialExperiment))
+
+output_dir <- Sys.getenv("MAPMET2_OUTPUT", "/mnt/data/output_mapmet2")  # holds spe_*.rds
+inter_dir  <- file.path(output_dir, "R_intermediary")
+dir.create(inter_dir, showWarnings = FALSE, recursive = TRUE)
+
+## ---- lost cells: the kept-cell list is just spe_02's cells -----------------
+extract_kept <- function(spe02_path, out_name) {
+  if (!file.exists(spe02_path)) {
+    message("skip kept-cells: ", spe02_path, " not found"); return(invisible())
+  }
+  spe02 <- readRDS(spe02_path)
+  saveRDS(colnames(spe02), file.path(inter_dir, out_name))
+  message(sprintf("wrote %s  (%d kept cells)", out_name, ncol(spe02)))
+}
+
+## ---- phenotyping: the k=30 labels BEFORE GMM subclustering ------------------
+# MapMet2's 04 stores them in pg_clusters_k30 (pg_clusters holds the labels
+# after the optional GMM subclustering).
+extract_pheno <- function(spe_paths, out_name, cols = c("pg_clusters_k30", "pg_clusters")) {
+  spe_path <- spe_paths[file.exists(spe_paths)][1]
+  if (is.na(spe_path)) {
+    message("skip phenotyping: none found of ", paste(spe_paths, collapse = ", "))
+    return(invisible())
+  }
+  spe <- readRDS(spe_path)
+  col <- cols[cols %in% names(colData(spe))][1]
+  if (is.na(col))
+    stop("none of (", paste(cols, collapse = ", "), ") found in ", spe_path)
+  if (col != "pg_clusters_k30")
+    warning("using ", col, " - these are post-GMM labels if subclustering was applied")
+  v <- setNames(as.character(colData(spe)[[col]]), colnames(spe))
+  saveRDS(v, file.path(inter_dir, out_name))
+  message(sprintf("wrote %s  (%d cells, %d clusters; from %s col %s)",
+                  out_name, length(v), length(unique(v)), basename(spe_path), col))
+}
+
+extract_kept(file.path(output_dir, "spe_02_QC_1.rds"), "kept_cells_BM.rds")
+extract_pheno(file.path(output_dir, c("spe_04_phenotyping.rds",
+                                      "spe_04_phenotyping_clusters.rds")),
+              "pg_clusters_BM.rds")
+
+message("\nDone. Intermediaries written to: ", inter_dir)

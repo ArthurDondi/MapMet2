@@ -1,0 +1,35 @@
+---
+title: "Home"
+site: workflowr::wflow_site
+output:
+  workflowr::wflow_html:
+    toc: false
+editor_options:
+  chunk_output_type: console
+---
+
+This site documents **MapMet2**, the R-based single-cell analysis of
+neuroblastoma **bone-marrow (BM)** samples imaged by IMC: normal control BM and
+patient BM at diagnosis (DE), at the treatment timepoints T1 and T2 and at
+relapse (REL). BM samples are cytospins, so the analysis is single-cell only
+(no spatial analysis). MapMet2 is adapted from
+[MapMetSC](https://github.com/TaschnerMandlGroup/MapMetSC), which analyses the
+primary tumors, and uses data processed with
+[MapMetIP](https://github.com/TaschnerMandlGroup/MapMetIP).
+
+The steps below are run in order. To reproduce the whole pipeline, set the data
+paths in `run_analysis.R` (in the repository root) and run it; each step reads
+the object saved by the previous step. Shared colors are defined once in the
+helper script `00_MapMet_color_code.R`, which every step sources.
+
+## Pipeline
+
+1. [Read single-cell and meta-data, and patient cohort overview](01_read_data.html)
+2. [Quality control – part 1 (lost cells)](02_QC_1.html)
+3. [Quality control – part 2 (segmentation artifacts)](03_QC_2.html)
+4. [Cell phenotyping](04_phenotyping.html) — clustering, label transfer from
+   MapMetSC, and the two-pass cluster annotation
+5. Validation by correlation with reference scRNA-seq datasets
+    - [5.1 Fetahu et al. (neuroblastoma bone marrow)](05.1_correlation_Fetahu.html)
+    - [5.2 Lee et al. (healthy bone marrow)](05.2_correlation_Lee.html)
+6. [Region and marker images](06_generate_images.html)

@@ -1,0 +1,17 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+.Rapp.history
+.DS_Store
+analysis/figure
+analysis/*png
+analysis/*html
+analysis/*_cache
+analysis/site_libs
+docker_command.txt
+# Built Apptainer/Singularity images (can be several GB)
+*.sif
+# SLURM logs (run_mapmet2_slurm.sh) and RStudio-Server scratch dirs (apptainer/README.md)
+logs/
+rstudio-run/

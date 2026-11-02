@@ -1,0 +1,317 @@
+---
+title: "Quality control - Part 2"
+author: "LazDaria, ArthurDondi"
+date: "`r Sys.Date()`"
+output:
+  workflowr::wflow_html
+editor_options:
+  chunk_output_type: inline
+params:
+  input: !r Sys.getenv("MAPMET2_INPUT", "/mnt/data/input_all")
+  output: !r Sys.getenv("MAPMET2_OUTPUT", "/mnt/data/output_mapmet2")
+  # BM image used to illustrate the clipped morphological features (falls back
+  # to the first image in the data if this one is missing).
+  example_image: "20220517_20220309_20-154_BM_003"
+---
+
+
+```{r setup, include=FALSE}
+plot_dir <- file.path(params$output, "plots/03_QC_2")
+if (!dir.exists(plot_dir)) {
+  dir.create(plot_dir, recursive = TRUE)
+}
+
+date_prefix <- format(Sys.Date(), "%Y%m%d")
+
+# Save a plot (ggplot / Heatmap / base R)
+save_plot <- function(plot_obj, filename, width = 8, height = 6, dpi = 300) {
+  full_path <- file.path(plot_dir, paste0(date_prefix, "_", filename))
+
+  if (inherits(plot_obj, "ggplot")) {
+    ggsave(full_path, plot = plot_obj, width = width, height = height, dpi = dpi, bg = "white")
+  } else if (inherits(plot_obj, "Heatmap") || inherits(plot_obj, "HeatmapList")) {
+    # ComplexHeatmap -> PDF
+    pdf(full_path, width = width, height = height)
+    draw(plot_obj)
+    dev.off()
+  } else {
+    dev.copy(png, full_path, width = width * dpi, height = height * dpi, res = dpi)
+    dev.off()
+  }
+  message("Saved: ", full_path)
+}
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  error = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  dev = "png",
+  dpi = 300,
+  fig.width = 8,
+  fig.height = 6
+)
+```
+
+# Quality control - Exclusion of segmentation artifacts {#qc-2}
+Despite the employment of a highly-accurate (fine-tuned) cellpose model for segmentation, segmentation artifacts can't be avoided completely. As a second quality control step, we will exclude these before we continue with downstream analysis.
+
+## Load libraries
+<details>
+   <summary>Load libraries</summary>
+
+```{r load-libraries}
+library(ggplot2)
+library(cowplot)
+library(cytomapper)
+```
+</details>
+
+## Read SPE object
+
+We will first read the spatial experiment object (SPE) that passed the [first quality check](#qc-1).
+
+
+```{r read-steinbock}
+path <- params$output
+spe <- readRDS(file.path(path,"spe_02_QC_1.rds"))
+```
+
+For the exclusion of segmentation artifacts, we will examine three morphological features (area, solidity and aspect ratio). All MapMet2 samples are bone-marrow (BM) cytospins of BM aspirates (cells in suspension), so one set of thresholds applies to all samples; MapMetSC derived separate thresholds for primary tumors, whose nuclei are smaller and less round.
+
+```{r morph-features}
+morph_names <- c("area",
+                 "solidity",
+                 "aspect_ratio-0"
+                 )
+```
+
+## Threshold identification
+Next, we plot distributions of morphological features in histograms to identify feature-individual thresholds for the exclusion of segmentation artifacts.
+
+```{r plot-histograms-bm}
+morph_mat_bm <- as.matrix(t(colData(spe)[,morph_names]))
+rownames(morph_mat_bm) <- gsub('-0','',rownames(morph_mat_bm))
+colnames(morph_mat_bm) <- colnames(spe)
+
+plot_list <- list()
+
+df <- as.data.frame(t(morph_mat_bm))
+
+for(i in 1: ncol(df)){
+
+  feature <- colnames(df)[i]
+
+  plot_list[[i]] <- ggplot(df, aes_string(feature)) +
+  geom_density(adjust = 1, color="darkblue", fill="lightblue")
+}
+
+plot <- plot_grid(plotlist = plot_list, nrow=ceiling(ncol(df)/3), ncol=3)
+
+
+save_plot(plot, "morpho_features_BM.png", width = 12, height = 12)
+
+
+plot
+```
+
+In the plots above, the distributions are skewed indicating the presence of outliers. Let's examine these outliers cells. We will identify their cell ID and check their morphology in images and masks.
+
+```{r quality-control-outliers}
+feat <- "area"
+
+morph_mat_order <- morph_mat_bm[feat,order(morph_mat_bm[feat,], decreasing=T)]
+outlier_cell <- names(morph_mat_order[2])
+value <- morph_mat_order[outlier_cell]
+id <- sub(".*_", "", outlier_cell)
+image <- sub("_[^_]*$", "", outlier_cell)
+print(paste("The outlier cell with ", feat, "=", value, " with ID", id, "is in image", image,"."))
+```
+
+Let's inspect this cell in the image and mask.
+
+```{r visualize-outliers, fig.show='hide'}
+masks <- loadImages(file.path(params$input, "masks", paste0(image, ".tif")), as.is = TRUE)
+img <- loadImages(file.path(params$input, "img", paste0(image, ".tif")))
+
+mcols(masks) <- DataFrame(sample_id = names(masks))
+mcols(img) <- DataFrame(sample_id = names(img))
+# image channels follow the panel order of the "_mean" channels
+marker_names <- rownames(spe)[grepl("_mean$", rownames(spe))]
+channelNames(img) <- marker_names[seq_len(dim(img[[1]])[3])]
+
+tmp <- spe[,spe$sample_id==image]
+tmp$outlier <- "no"
+tmp[,colnames(tmp)==outlier_cell]$outlier <- "yes"
+
+dapi_plot <- plotPixels(img,
+                       colour_by = "IF1_DAPI_mean",
+                       bcg = list(IF1_DAPI_mean = c(0, 1, 1)),
+                       legend=NULL,
+                       return_plot = TRUE)
+
+mask_plot <- plotCells(masks,
+                       object = tmp,
+                       cell_id = "ObjectNumber",
+                       img_id = "sample_id",
+                       colour_by = "outlier",
+                       colour = list(outlier = c("no" = "gray", "yes" = "red")),
+                       missing_colour = "white",
+                       legend=NULL,
+                       return_plot = TRUE)
+```
+```{r plot-grid-1}
+p1 <- ggdraw(dapi_plot$plot, clip = "on")
+p2 <- ggdraw(mask_plot$plot, clip = "on")
+
+p <- plot_grid(p1, p2)
+
+save_plot(p, "example_large_cell.png", width = 12, height = 12)
+p
+```
+
+In the images above, we can see that segmentation artifacts occur, where no clear cell borders can be identified. For BM, MapMetSC determined an upper threshold of **15,600** and a lower threshold of **333** for nuclear area (the original Lazic et al. analysis used 250 as lower threshold). To examine nuclei with an area below the lower threshold, it is better to visualize images in napari and use the label and zoom function; the smallest nucleus is reported below.
+
+```{r quality-control-outliers-small, message=FALSE}
+feat <- "area"
+
+morph_mat_order <- morph_mat_bm[feat,order(morph_mat_bm[feat,], decreasing=F)]
+outlier_cell <- names(morph_mat_order[1])
+print(paste("The outlier cell with ", feat, "=", morph_mat_order[outlier_cell], " with ID", sub(".*_", "", outlier_cell), "is in image", sub("_[^_]*$", "", outlier_cell),". Check, whether this cell is an artifact by inspecting the segmentation masks in napari."))
+```
+
+## Exclusion of segmentation artifacts
+Let's exclude outliers from the SPE object and the morph. feature matrix based on defined thresholds.
+
+```{r exclude-outliers}
+# Nuclear-area thresholds for BM (MapMetSC, 03_QC_2)
+area_min <- 333
+area_max <- 15600
+
+outliers <- spe$area <= area_min | spe$area >= area_max
+
+spe <- spe[,!outliers]
+
+# morph feature matrix for the remaining cells
+morph_mat <- as.matrix(t(colData(spe)[,morph_names]))
+rownames(morph_mat) <- gsub('-0','',rownames(morph_mat))
+```
+
+We excluded `r sum(outliers)` cells based on these thresholds.
+
+## Clipping and scaling of morphological features
+
+Before we save the SPE object, we will clip and scale morphological features for **visualization purposes**.
+
+```{r clip-morph}
+
+norm_minmax <- function(x){(x- min(x)) /(max(x)-min(x))}
+
+clipper <- function(data, lower, upper) {
+  data[data > quantile(data, probs = c(upper))] <- quantile(data, probs = c(upper))
+  data[data < quantile(data, probs = c(lower))] <- quantile(data, probs = c(lower))
+  clipped_data <- norm_minmax(data)
+  return(clipped_data)}
+
+area_upper <- 0.99999
+solidity_lower <- 0.001
+aspect_ratio_upper <- 0.9995
+
+morph_mat_clipped <- rbind(clipper(morph_mat[1,], 0, area_upper),
+                           clipper(morph_mat[2,], solidity_lower, 1),
+                           clipper(morph_mat[3,], 0, aspect_ratio_upper))
+
+colnames(morph_mat_clipped) <- colnames(spe)
+rownames(morph_mat_clipped) <- c("area", "solidity", "aspect_ratio")
+
+spe$area_clipped <- unname(morph_mat_clipped["area",])
+spe$solidity_clipped <- unname(morph_mat_clipped["solidity",])
+spe$aspect_ratio_clipped <- unname(morph_mat_clipped["aspect_ratio",])
+```
+
+We plot the distribution of clipped morphological features...
+
+```{r histograms-separate-x-axis}
+plot_list <- list()
+
+df <- as.data.frame(t(morph_mat_clipped))
+
+for(i in 1: ncol(df)){
+
+  feature <- colnames(df)[i]
+
+  plot_list[[i]] <- ggplot(df, aes_string(feature)) +
+  geom_density(adjust = 5, color="darkblue", fill="lightblue")
+}
+
+plot <- plot_grid(plotlist = plot_list, nrow=ceiling(ncol(df)/3), ncol=3)
+
+
+
+save_plot(plot, "morph_.png", width = 12, height = 12)
+
+
+plot
+```
+
+...and visualize the masks of one BM sample.
+
+```{r visualize-clipped-morph}
+morph_names_clipped <- c("area_clipped", "solidity_clipped", "aspect_ratio_clipped")
+
+example_id <- params$example_image
+if (!example_id %in% spe$sample_id ||
+    !file.exists(file.path(params$input, "masks", paste0(example_id, ".tif")))) {
+  example_id <- unique(as.character(spe$sample_id))[1]
+  message("Example image '", params$example_image, "' not available; using '", example_id, "'.")
+}
+
+masks <- loadImages(file.path(params$input, "masks", paste0(example_id, ".tif")), as.is = TRUE)
+names(masks) <- example_id
+mcols(masks)$sample_id <- example_id
+
+# One plot per morphological feature, saved individually
+for (m in seq_along(morph_names_clipped)) {
+  current_morph <- morph_names_clipped[m]
+  message(paste0("Plotting: ", current_morph, " | ", example_id))
+
+  p <- plotCells(
+    masks,
+    object = spe,
+    cell_id = "ObjectNumber",
+    img_id = "sample_id",
+    colour_by = current_morph,
+    return_plot = TRUE,
+    return_images = TRUE,
+    legend = NULL
+  )
+
+  save_plot(
+    p,
+    filename = paste0(current_morph, "_", example_id, ".png"),
+    width = 12,
+    height = 12
+  )
+}
+```
+
+## Save object {#qc2-save}
+
+From now on, we will use intensity measurements computed based on the dilated mask (by 1px). To reduce the size of the SPE object, we remove intensity measurements obtained based on non-dilated masks and set those based on dilated masks as default.
+
+```{r save-objects-read-data}
+assay(spe, "counts") <- assay(spe, "counts_1px")
+assay(spe, "counts_1px") <- NULL
+
+saveRDS(spe, file.path(params$output, "spe_03_QC_2.rds"))
+```
+
+## Session Info
+
+<details>
+   <summary>SessionInfo</summary>
+
+```{r, echo = FALSE}
+sessionInfo()
+```
+</details>

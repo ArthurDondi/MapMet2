@@ -1,0 +1,122 @@
+#!/usr/bin/env Rscript
+# ============================================================================
+# MapMet2 — master script
+#
+# Renders the MapMet2 single-cell pipeline (neuroblastoma bone marrow, IMC) end
+# to end, in order. Adapted from MapMetSC's run_analysis.R. Each step reads the
+# object saved by the previous step from `output` and writes its own object and
+# figures back to `output`.
+#
+# Setup
+# -----
+#   1. Download and extract the MapMetIP-processed single-cell data from Zenodo
+#      (see the README); the Supplementary Tables and the public reference
+#      datasets (Fetahu / Lee) are expected next to it, as for MapMetSC.
+#   2. Point the paths in the CONFIG block below at that data (or export the
+#      MAPMET2_* environment variables). The defaults assume the container mount
+#      `-v <singlecelldata>:/mnt/data` (see README).
+#   3. From the repository root run:   Rscript run_analysis.R
+#
+# Cell-type annotation is TWO-PASS (see README / analysis/04_phenotyping.Rmd):
+#   * first run: everything up to 04_phenotyping is rendered; 04 writes
+#     <output>/annotation/cluster_annotation_BM_template.xlsx and stops, and the
+#     steps after it are skipped;
+#   * fill the template, save it as <output>/R_intermediary/cluster_annotation_BM.xlsx
+#     (or set MAPMET2_ANNOTATION) and run again: the frozen kept-cell list and
+#     phenograph clusters are reused, so the cluster IDs stay valid.
+#   Setting MAPMET2_ANNOTATION_FALLBACK=transfer instead uses the cell types
+#   transferred from MapMetSC with SingleR (needs MAPMET2_REFERENCE).
+#
+# Rendered HTML is written to docs/; intermediate objects (spe_*.rds) and
+# figures to `output`.
+# ============================================================================
+
+# ---------------------------- CONFIG (edit me) ------------------------------
+# Either export the MAPMET2_* environment variables or replace the fallback
+# strings after the commas. The same variables drive the per-Rmd `params:`
+# defaults, so knitting a single .Rmd interactively picks them up too.
+input     <- Sys.getenv("MAPMET2_INPUT",  "/mnt/data/input_all")          # MapMetIP_ProcessedDataset (steinbock data + NB_Panel.csv)
+public    <- Sys.getenv("MAPMET2_PUBLIC", "/mnt/data/public_datasets")    # public scRNA-seq references (Fetahu / Lee) + protein2gene.csv
+output    <- Sys.getenv("MAPMET2_OUTPUT", "/mnt/data/output_mapmet2")     # writable; keep it separate from MapMetSC's output
+reference <- Sys.getenv("MAPMET2_REFERENCE", "")                          # MapMetSC's annotated spe_04_phenotyping.rds (label transfer; "" = skip)
+
+# Analysis settings, chosen after inspecting the first run (see README):
+lost_cell_clusters  <- NULL       # 02_QC_1: lost-cell clusters of that run's heatmap, e.g. c("26"); NULL = frozen list / IMC-DNA heuristic
+gmm_subclusters     <- list()     # 04_phenotyping: e.g. list(list(cluster = "5", new = "35", markers = c("CD3_")))
+annotation_file     <- Sys.getenv("MAPMET2_ANNOTATION", "")               # "" = cluster_annotation_BM.xlsx in R_intermediary
+annotation_fallback <- Sys.getenv("MAPMET2_ANNOTATION_FALLBACK", "none")  # "none" (two-pass) or "transfer"
+# ----------------------------------------------------------------------------
+
+dir.create(output, showWarnings = FALSE, recursive = TRUE)
+if (nzchar(reference) &&
+    normalizePath(dirname(reference), mustWork = FALSE) == normalizePath(output, mustWork = FALSE))
+  stop("MAPMET2_OUTPUT (", output, ") is the folder of the MapMetSC reference (", reference,
+       "): MapMet2 would overwrite it. Use a separate output folder.")
+
+render_step <- function(rmd, params) {
+  message("\n=====================================================================")
+  message("Rendering: ", rmd)
+  message("=====================================================================")
+  rmarkdown::render(
+    input      = rmd,
+    output_dir = "docs",
+    params     = params,
+    envir      = new.env(),
+    quiet      = FALSE
+  )
+}
+
+main_params  <- list(input = input, output = output)
+qc1_params   <- c(main_params, if (length(lost_cell_clusters)) list(lost_cell_clusters = lost_cell_clusters))
+pheno_params <- c(main_params, list(reference           = reference,
+                                    annotation_file     = annotation_file,
+                                    annotation_fallback = annotation_fallback,
+                                    gmm_subclusters     = gmm_subclusters))
+corr_params  <- list(input = input, output = output, public = public)
+
+# --- Main single-cell pipeline ----------------------------------------------
+# Shared colors live in analysis/00_MapMet_color_code.R, which each script
+# sources automatically - it is a helper, not a rendered step.
+render_step("analysis/01_read_data.Rmd",   main_params)   # BM samples + cohort overview
+render_step("analysis/02_QC_1.Rmd",        qc1_params)    # lost cells (freezes kept_cells_BM.rds)
+render_step("analysis/03_QC_2.Rmd",        main_params)   # segmentation artifacts
+
+pheno_start <- Sys.time()
+render_step("analysis/04_phenotyping.Rmd", pheno_params)  # clusters, label transfer, annotation
+
+# 04 writes spe_04_phenotyping.rds only once the clusters are annotated.
+spe04 <- file.path(output, "spe_04_phenotyping.rds")
+annotated <- file.exists(spe04) && file.mtime(spe04) >= pheno_start
+
+if (!annotated) {
+  message("\nCluster annotation pending: steps 05-06 skipped.\n",
+          "Fill ", file.path(output, "annotation", "cluster_annotation_BM_template.xlsx"),
+          ", save it as ", file.path(output, "R_intermediary", "cluster_annotation_BM.xlsx"),
+          " and run run_analysis.R again.")
+} else {
+  # --- Validation by correlation with reference scRNA-seq datasets ----------
+  render_step("analysis/05.1_correlation_Fetahu.Rmd", corr_params)   # NB bone marrow (Fetahu et al.)
+  render_step("analysis/05.2_correlation_Lee.Rmd",    corr_params)   # healthy bone marrow (Lee et al.)
+
+  # --- Region / marker images (customised params) -------------------------
+  # Standalone image step with its own params (image ids, crops, markers).
+  # Reads spe_04_phenotyping.rds.
+  image_params <- list(
+    input    = input,
+    output   = output,
+    # Images to render in one pass (add / remove ids here).
+    image_ids = c("20220517_20220309_20-154_BM_003"),
+    markers  = c("DNA1_Ir193_mean", "GD2_Gd155_mean", "CD45_Eu153_mean",   # Ir193 = DNA2
+                 "CD3_Sm152_mean", "CD14_Lu175_mean", "CD15_Bi209_mean"),
+    # colour per marker (individual image + merge), keyed by short marker name
+    marker_colours = c(DNA1 = "blue", GD2 = "green", CD45 = "magenta",
+                       CD3 = "red", CD14 = "cyan", CD15 = "yellow"),
+    # all six markers go into the merge (cytomapper's maximum)
+    merge_exclude = character(0),
+    # One zoom window c(xmin, xmax, ymin, ymax) per image id; NULL = whole image only.
+    crops    = list(NULL)
+  )
+  render_step("analysis/06_generate_images.Rmd", image_params)
+
+  message("\nAll steps completed. Rendered HTML is in docs/; objects & figures in ", output)
+}

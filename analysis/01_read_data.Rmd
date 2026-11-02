@@ -1,0 +1,386 @@
+---
+title: "Read single-cell and meta-data"
+author: "LazDaria, ArthurDondi"
+date: "`r Sys.Date()`"
+output:
+  workflowr::wflow_html
+editor_options:
+  chunk_output_type: inline
+params:
+  input: !r Sys.getenv("MAPMET2_INPUT", "/mnt/data/input_all")
+  output: !r Sys.getenv("MAPMET2_OUTPUT", "/mnt/data/output_mapmet2")
+---
+
+```{r setup, include=FALSE}
+plot_dir <- file.path(params$output, "plots/01_read_data")
+if (!dir.exists(plot_dir)) {
+  dir.create(plot_dir, recursive = TRUE)
+}
+
+date_prefix <- format(Sys.Date(), "%Y%m%d")
+
+# Save a plot (ggplot / Heatmap / base R)
+save_plot <- function(plot_obj, filename, width = 8, height = 6, dpi = 300) {
+  full_path <- file.path(plot_dir, paste0(date_prefix, "_", filename))
+
+  if (inherits(plot_obj, "ggplot")) {
+    ggsave(full_path, plot = plot_obj, width = width, height = height, dpi = dpi)
+  } else if (inherits(plot_obj, "Heatmap") || inherits(plot_obj, "HeatmapList")) {
+    # ComplexHeatmap -> PDF
+    pdf(full_path, width = width, height = height)
+    draw(plot_obj)
+    dev.off()
+  } else {
+    dev.copy(png, full_path, width = width * dpi, height = height * dpi, res = dpi)
+    dev.off()
+  }
+  message("Saved: ", full_path)
+}
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  error = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  dev = "png",
+  dpi = 300,
+  fig.width = 8,
+  fig.height = 6
+)
+```
+
+# Read in the data {#read-data}
+
+MapMet2 analyses **bone-marrow (BM)** samples of neuroblastoma (NB) patients at
+diagnosis (DE), at the two treatment timepoints T1 and T2 (coded `RE1` / `RE2`
+in the metadata) and at relapse (REL), together with the normal control BM
+samples also used in [MapMetSC](https://github.com/TaschnerMandlGroup/MapMetSC).
+BM samples are cytospins of BM aspirates, so the analysis is purely single-cell
+(no spatial analysis); primary tumors are analysed in MapMetSC.
+
+We first read in single-cell data, previously extracted from processed multi-modal (IMC, IF) images in [MapMetIP](https://github.com/TaschnerMandlGroup/MapMetIP) or downloaded from [Zenodo](https://zenodo.org/records/13220635/files/MapMetIP_ProcessedDataset.zip). For reading the data, we use the [imcRtools](https://github.com/BodenmillerGroup/imcRtools) package. This package uses the `read_steinbock` function to read data into a `SpatialExperiment` (SPE). The [SpatialExperiment](https://bioconductor.org/packages/release/bioc/html/SpatialExperiment.html) class [@Righelli2021] is an extension of the `SingleCellExperiment` class.
+For more information, please refer to `?read_steinbock`.
+
+## Load libraries
+<details>
+   <summary>Load libraries</summary>
+
+```{r load-libraries}
+library(imcRtools)
+library(stringr)
+library(RColorBrewer)
+library(circlize)
+library(paletteer)
+library(dittoSeq)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+library(ggplot2)
+library(grid)  # for unit() in the cohort overview figure
+```
+</details>
+
+Shared colors and the timepoint display labels (`RE1` → `T1`, `RE2` → `T2`) are defined once in `00_MapMet_color_code.R`.
+
+```{r color-code}
+for (mapmet_cc_path in c("analysis/00_MapMet_color_code.R", "00_MapMet_color_code.R", "../analysis/00_MapMet_color_code.R"))
+  if (file.exists(mapmet_cc_path)) { source(mapmet_cc_path); break }
+
+# Metadata timepoint code -> display label. Control BM samples are labelled
+# "control"; codes missing from TIMEPOINT_RELABEL are kept as they are.
+relabel_timepoint <- function(code, control) {
+  code  <- as.character(code)
+  label <- unname(ifelse(code %in% names(TIMEPOINT_RELABEL), TIMEPOINT_RELABEL[code], code))
+  label[is.na(label) | label %in% c("NA", "")] <- "unknown"
+  label[!is.na(control) & control == "yes"] <- "control"
+  label
+}
+```
+
+## Read single-cell measurement
+
+The single-cell data folder is given by `params$input` (e.g. `.../MapMetIP_ProcessedDataset` if the processed data was downloaded from Zenodo).
+In [MapMetIP](https://github.com/TaschnerMandlGroup/MapMetIP), we exported single-cell marker measurements based on non-dilated and dilated (by 1px) segmentation masks to capture membrane signals. As both are required in the downstream analysis, we read in both and combine them into one SPE object, saving each expression matrix into one `assays`slot. Measurements based on non-dilated masks will be in the `assays`slot `counts` and the measurements based on dilated masks will be stored in `counts_1px`.
+
+
+```{r read-steinbock}
+path <- file.path(params$input)
+
+# Read only the bone-marrow (BM) files; primary tumors (TU) and the adrenal-gland
+# (AD) reference are analysed in MapMetSC.
+sample_pattern <- "_BM_"
+
+spe_0px <- read_steinbock(path=path, image_file=NULL, panel_file = file.path(path, 'NB_Panel.csv'), intensities_folder = "intensities-0px",regionprops_folder = "regionprops", graphs_folder=NULL, pattern = sample_pattern)
+spe_1px <- read_steinbock(path=path, image_file=NULL, panel_file = file.path(path, 'NB_Panel.csv'), intensities_folder = "intensities-1px",regionprops_folder = "regionprops", graphs_folder=NULL, pattern = sample_pattern)
+
+spe <- spe_0px
+assay(spe, "counts_1px") <- assay(spe_1px, "counts")
+
+rm(spe_0px)
+rm(spe_1px)
+```
+
+## Read single-cell metadata
+
+We set the `colnames` of the object to generate unique identifiers per cell.
+
+```{r set-colnames}
+colnames(spe) <- paste0(spe$sample_id, "_", spe$ObjectNumber)
+```
+
+We then read sample- and patient-specific metadata from the file provided on Zenodo [(Supplementary_Tables/20260526_Suppl_Table1.xlsx)](https://doi.org/10.5281/zenodo.13220634).
+
+```{r read-metadata}
+
+# Supplementary_Tables may sit inside the input dir or beside it (Zenodo layout).
+.suppl_cands <- file.path(c(params$input, dirname(params$input)), "Supplementary_Tables", '20260526_Suppl_Table1.xlsx')
+file_path <- .suppl_cands[file.exists(.suppl_cands)][1]
+if (is.na(file_path)) stop("Supplementary table not found in:\n  ", paste(.suppl_cands, collapse = "\n  "))
+sample_spec_metadata <- read_excel(file_path, sheet = "sample_spec_metadata")
+patient_spec_clinical <- read_excel(file_path, sheet = "patient_spec_clinical")
+patient_spec_genetic <- read_excel(file_path, sheet = "patient_spec_genetic")
+
+merged_data <- sample_spec_metadata %>%
+  left_join(patient_spec_clinical, by = "Patient_ID")
+
+meta <- merged_data %>%
+  left_join(patient_spec_genetic, by = "Patient_ID")
+```
+
+and assign it to the colData slot in our SPE object. All BM samples are kept: control BM and NB-patient BM at every timepoint. The metadata timepoint code is stored in `timepoint_code`; `timepoint` holds the display label (`control`, `DE`, `T1`, `T2`, `REL`).
+
+```{r add-coldata}
+
+spe$sample <- sub("_[^_]+$", "", spe$sample_id)
+spe$fm_id <- str_match(spe$sample, "_.*_(.*)_")[,2]
+spe$tissue <- str_match(spe$sample, "^.*_.*_(.*)")[,2]
+
+# Keep bone-marrow images only (safety net on top of the read pattern)
+spe <- spe[, spe$tissue == "BM"]
+
+# Metadata row of each cell, matched on sample ID + tissue
+meta_idx <- match(paste(spe$fm_id, spe$tissue), paste(meta$Sample_ID, meta$Tissue))
+no_meta <- unique(spe$sample_id[is.na(meta_idx)])
+if (length(no_meta)) {
+  message(length(no_meta), " BM image(s) without a metadata entry are dropped: ",
+          paste(no_meta, collapse = ", "))
+  keep <- !is.na(meta_idx)
+  spe <- spe[, keep]
+  meta_idx <- meta_idx[keep]
+}
+
+spe$puncture_side <- meta$Puncture_side[meta_idx]
+spe$imc_score <- meta$IMC_score[meta_idx]
+spe$staining_date <- meta$Staining_date[meta_idx]
+spe$stainer <- meta$Stainer[meta_idx]
+spe$imc_date <- meta$IMC_date[meta_idx]
+spe$control <- meta$control[meta_idx]
+spe$patient_id <- meta$Patient_ID[meta_idx]
+spe$timepoint_code <- as.character(meta$Timepoint[meta_idx])
+spe$timepoint <- relabel_timepoint(spe$timepoint_code, spe$control)
+
+spe$stage <- meta$INSS_stage[meta_idx]
+spe$progression <- meta$efs[meta_idx]
+spe$death <- meta$death[meta_idx]
+spe$efs_dur <- meta$efs_dur[meta_idx]
+spe$death_dur <- meta$death_dur[meta_idx]
+spe$X1p_loss <- meta$X1p_loss[meta_idx]
+spe$X11q_loss <- meta$X11q_loss[meta_idx]
+spe$X17q_gain <- meta$X17q_gain[meta_idx]
+spe$MYCN_amp <- meta$MYCN_amp[meta_idx]
+spe$age_diag <- meta$age_at_diag[meta_idx]
+spe$therapy <- meta$therapy[meta_idx]
+spe$sex_aab <- meta$sex_aab[meta_idx]
+
+spe$ROI <- str_match(spe$sample_id, "^.*_.*_.*_.*_(.*)")[,2]
+spe$year <- str_c("20", str_extract(spe$fm_id, "^[0-9]+"))
+
+```
+
+The resulting BM samples per timepoint (one row per sample; a sample can have several ROIs/images):
+
+```{r samples-per-timepoint}
+sample_tab <- as.data.frame(colData(spe)) %>%
+  distinct(sample, fm_id, patient_id, control, timepoint_code, timepoint)
+
+unknown_tp <- sample_tab$sample[sample_tab$timepoint == "unknown"]
+if (length(unknown_tp))
+  message("BM sample(s) without a timepoint in the metadata (labelled 'unknown'): ",
+          paste(unknown_tp, collapse = ", "))
+
+tp_levels <- union(TIMEPOINT_LEVELS, sort(unique(sample_tab$timepoint)))
+knitr::kable(as.data.frame(table(timepoint = factor(sample_tab$timepoint, levels = tp_levels)),
+                           responseName = "n_samples"))
+```
+
+Before saving, we check the distribution of the two DNA channels across timepoints.
+
+```{r plot-by-timepoint}
+
+marker <- 'DNA1_Ir191_mean'
+p1 <- dittoRidgePlot(spe, var = marker, group.by = "timepoint", assay = "counts") +
+    ggtitle(paste(marker,  "- per timepoint"))
+marker <- 'DNA1_Ir193_mean'
+p2 <- dittoRidgePlot(spe, var = marker, group.by = "timepoint", assay = "counts") +
+    ggtitle(paste(marker,  "- per timepoint"))
+p <- (p1 | p2)
+
+p
+
+save_plot(p, "DNA_markers_rawdata.png", width = 24, height = 12)
+
+```
+
+# Patient cohort overview {#cohort-overview}
+
+We summarise the NB-patient BM cohort (control samples excluded) in a single overview figure, one column per patient: age at diagnosis as a bar plot, the availability of a BM sample at each timepoint (DE, T1, T2, REL), and sex together with the key genetic / clinical tracks (MYCN amplification, 1p loss and progression) as colored tiles. The table is built from the sample- and patient-level metadata (`meta`), restricted to the BM samples imaged in this dataset.
+
+```{r cohort-table}
+# NB-patient BM samples with images in this dataset (controls excluded)
+bm_samples <- unique(paste(spe$fm_id, spe$tissue)[spe$timepoint != "control"])
+tp_cols    <- setdiff(TIMEPOINT_LEVELS, "control")   # DE, T1, T2, REL
+
+bm_meta <- meta %>%
+  filter(paste(Sample_ID, Tissue) %in% bm_samples) %>%
+  mutate(timepoint = relabel_timepoint(Timepoint, control))
+
+# Sample availability: one row per patient, one yes/no column per timepoint
+avail <- bm_meta %>%
+  filter(timepoint %in% tp_cols) %>%
+  distinct(Patient_ID, timepoint) %>%
+  mutate(present = "yes") %>%
+  pivot_wider(names_from = timepoint, values_from = present, values_fill = "no") %>%
+  mutate(patient_id = as.character(Patient_ID)) %>%
+  select(-Patient_ID)
+for (tp in setdiff(tp_cols, colnames(avail))) avail[[tp]] <- "no"
+
+cohort <- bm_meta %>%
+  distinct(Patient_ID, .keep_all = TRUE) %>%
+  transmute(
+    patient_id = as.character(Patient_ID),
+    age        = round(as.numeric(age_at_diag)),
+    sex        = as.character(sex_aab),
+    mycn       = as.character(MYCN_amp),
+    loss1p     = as.character(X1p_loss),
+    prog       = as.character(efs)
+  ) %>%
+  inner_join(avail, by = "patient_id")
+
+# Order patients by their sample-availability pattern (DE, T1, T2, REL), then ID
+ord    <- do.call(order, c(lapply(tp_cols, function(tp) cohort[[tp]] != "yes"),
+                           list(cohort$patient_id)))
+cohort <- cohort[ord, ]
+
+# Recode MYCN / 1p loss / progression to a shared yes/no/het/NA scheme so the
+# genetic / clinical tracks can share one legend.
+recode_ynh <- function(x) dplyr::recode(as.character(x),
+  "1" = "yes", "0" = "no", "2" = "het", "9" = "NA",
+  "MNA" = "yes", "nMNA" = "no", "het" = "het", "unknown" = "NA",
+  "Prog" = "yes", "NoProg" = "no", "yes" = "yes", "no" = "no",
+  .default = "NA", .missing = "NA")
+
+cohort$mycn   <- recode_ynh(cohort$mycn)
+cohort$loss1p <- recode_ynh(cohort$loss1p)
+cohort$prog   <- recode_ynh(cohort$prog)
+
+# sex -> f / m
+cohort$sex <- dplyr::recode(as.character(cohort$sex),
+  "1" = "f", "2" = "m", "female" = "f", "male" = "m", "F" = "f", "M" = "m",
+  .default = as.character(cohort$sex))
+
+# Fix patient order and factor levels
+lvl_ynh <- c("yes", "no", "het", "NA")
+cohort$patient_id <- factor(cohort$patient_id, levels = cohort$patient_id)
+cohort$mycn   <- factor(cohort$mycn,   levels = lvl_ynh)
+cohort$loss1p <- factor(cohort$loss1p, levels = lvl_ynh)
+cohort$prog   <- factor(cohort$prog,   levels = lvl_ynh)
+cohort$sex    <- factor(cohort$sex,    levels = c("f", "m"))
+for (tp in tp_cols) cohort[[tp]] <- factor(cohort[[tp]], levels = c("yes", "no"))
+
+message(nrow(cohort), " NB patients with at least one BM sample; samples per timepoint: ",
+        paste(tp_cols, vapply(tp_cols, function(tp) sum(cohort[[tp]] == "yes"), numeric(1)),
+              sep = " = ", collapse = ", "))
+```
+
+The panels share the same discrete x-axis (one column per patient) and are stacked with `patchwork`, with identical legends collected into one.
+
+```{r cohort-overview-figure, fig.width=9, fig.height=3.2}
+# Shared x-axis expansion so panels align column-by-column.
+X_EXPAND <- expansion(add = 0.5)
+
+max_age <- max(cohort$age, na.rm = TRUE)
+p_age <- ggplot(cohort, aes(x = patient_id, y = age)) +
+  geom_col(fill = "grey35", width = 0.8) +
+  scale_x_discrete(expand = X_EXPAND) +
+  scale_y_continuous(breaks = c(0, max_age),
+                     expand = expansion(mult = c(0, 0.05))) +
+  labs(y = "age[months]") +
+  theme_minimal() +
+  theme(
+    axis.text.x  = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.text.y  = element_text(size = 7),
+    axis.title.y = element_text(angle = 0, vjust = 0.5, hjust = 1, size = 8),
+    panel.grid   = element_blank(),
+    plot.margin  = margin(2, 2, 0, 2)
+  )
+
+tile_track <- function(var, fill_vals, breaks, legend_name, y_lab) {
+  ggplot(cohort, aes(x = patient_id, y = 1, fill = .data[[var]])) +
+    geom_tile(color = "white", linewidth = 0.4) +
+    scale_x_discrete(expand = X_EXPAND) +
+    scale_fill_manual(values = fill_vals, breaks = breaks, name = legend_name,
+                      na.value = "white", drop = FALSE) +
+    labs(y = y_lab) +
+    theme_void() +
+    theme(
+      legend.position  = "right",
+      legend.direction = "vertical",
+      legend.key.size  = unit(0.3, "cm"),
+      legend.text      = element_text(size = 7),
+      legend.title     = element_text(size = 8, face = "bold"),
+      axis.title.y     = element_text(angle = 0, vjust = 0.5, hjust = 1, size = 8),
+      plot.margin      = margin(0, 2, 0, 2)
+    )
+}
+
+# One availability track per timepoint (shared yes/no legend)
+p_avail <- lapply(tp_cols, function(tp)
+  tile_track(tp, COL_AVAIL, c("yes", "no"), "BM sample", paste0("BM (", tp, ")")))
+
+p_sex  <- tile_track("sex",    COL_SEX, c("f", "m"), "sex (AAB)",             "sex (AAB)")
+p_mycn <- tile_track("mycn",   COL_YNH, lvl_ynh,     "MNA / 1p loss / prog.", "MYCN amp.")
+p_1p   <- tile_track("loss1p", COL_YNH, lvl_ynh,     "MNA / 1p loss / prog.", "1p loss")
+p_prog <- tile_track("prog",   COL_YNH, lvl_ynh,     "MNA / 1p loss / prog.", "progression")
+
+# ---- Stack panels; collect legends into one column ----
+p_cohort <- wrap_plots(c(list(p_age), p_avail, list(p_sex, p_mycn, p_1p, p_prog)), ncol = 1) +
+  plot_layout(heights = c(2, rep(0.5, length(p_avail) + 4)), guides = "collect") &
+  theme(legend.direction = "vertical", legend.box = "vertical",
+        legend.justification = "top")
+
+p_cohort
+
+save_plot(p_cohort, "cohort_overview.pdf", width = 9, height = 3.2)
+```
+
+## Save object
+
+Finally, the generated SPE object can be saved for further downstream processing and analysis.
+
+```{r save-objects-read-data}
+
+saveRDS(spe, file.path(params$output, "spe_01_read_data.rds"))
+```
+
+## Session Info
+
+<details>
+   <summary>SessionInfo</summary>
+
+```{r, echo = FALSE}
+sessionInfo()
+```
+</details>
