@@ -18,10 +18,12 @@
 #   3. From the repository root run:   Rscript run_analysis.R
 #
 # Cell-type annotation is TWO-PASS (see README / analysis/04_phenotyping.Rmd):
-#   * first run: everything up to 04_phenotyping is rendered; 04 writes
-#     <output>/annotation/cluster_annotation_BM_template.xlsx and stops, and the
-#     steps after it are skipped;
-#   * fill the template, save it as <output>/R_intermediary/cluster_annotation_BM.xlsx
+#   * first run: everything up to 04_phenotyping is rendered; 04 clusters the
+#     cells for every k in `k_values`, writes
+#     <output>/annotation/cluster_annotation_BM_template.xlsx (an empty first tab
+#     plus one tab per k) and stops, and the steps after it are skipped;
+#   * annotate the tab of the chosen k, copy its rows into the FIRST tab (the only
+#     one read), save the workbook as <output>/R_intermediary/cluster_annotation_BM.xlsx
 #     (or set MAPMET2_ANNOTATION) and run again: the frozen kept-cell list and
 #     phenograph clusters are reused, so the cluster IDs stay valid.
 #   Setting MAPMET2_ANNOTATION_FALLBACK=transfer instead uses the cell types
@@ -42,7 +44,8 @@ reference <- Sys.getenv("MAPMET2_REFERENCE", "")                          # MapM
 
 # Analysis settings, chosen after inspecting the first run (see README):
 lost_cell_clusters  <- NULL       # 02_QC_1: lost-cell clusters of that run's heatmap, e.g. c("26"); NULL = frozen list / IMC-DNA heuristic
-gmm_subclusters     <- list()     # 04_phenotyping: e.g. list(list(cluster = "5", new = "35", markers = c("CD3_")))
+k_values            <- c(15, 30, 45, 60)  # 04_phenotyping: phenograph k values, one template tab each
+gmm_subclusters     <- list()     # 04_phenotyping: e.g. list(list(k = 30, cluster = "5", new = "35", markers = c("CD3_")))
 annotation_file     <- Sys.getenv("MAPMET2_ANNOTATION", "")               # "" = cluster_annotation_BM.xlsx in R_intermediary
 annotation_fallback <- Sys.getenv("MAPMET2_ANNOTATION_FALLBACK", "none")  # "none" (two-pass) or "transfer"
 # ----------------------------------------------------------------------------
@@ -71,6 +74,7 @@ qc1_params   <- c(main_params, if (length(lost_cell_clusters)) list(lost_cell_cl
 pheno_params <- c(main_params, list(reference           = reference,
                                     annotation_file     = annotation_file,
                                     annotation_fallback = annotation_fallback,
+                                    k_values            = k_values,
                                     gmm_subclusters     = gmm_subclusters))
 corr_params  <- list(input = input, output = output, public = public)
 
@@ -90,8 +94,10 @@ annotated <- file.exists(spe04) && file.mtime(spe04) >= pheno_start
 
 if (!annotated) {
   message("\nCluster annotation pending: steps 05-06 skipped.\n",
-          "Fill ", file.path(output, "annotation", "cluster_annotation_BM_template.xlsx"),
-          ", save it as ", file.path(output, "R_intermediary", "cluster_annotation_BM.xlsx"),
+          "Annotate the tab of the chosen k in ",
+          file.path(output, "annotation", "cluster_annotation_BM_template.xlsx"),
+          ", copy its rows into the first tab, save the workbook as ",
+          file.path(output, "R_intermediary", "cluster_annotation_BM.xlsx"),
           " and run run_analysis.R again.")
 } else {
   # --- Validation by correlation with reference scRNA-seq datasets ----------

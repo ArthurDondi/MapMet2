@@ -27,7 +27,7 @@ analyses the diagnostic primary tumors; both build on data processed with
 | 1 | `analysis/01_read_data.Rmd` — read the BM images and metadata; patient cohort overview | `spe_01_read_data.rds` |
 | 2 | `analysis/02_QC_1.Rmd` — exclude cells lost between IF and IMC | `spe_02_QC_1.rds` |
 | 3 | `analysis/03_QC_2.Rmd` — exclude segmentation artifacts | `spe_03_QC_2.rds` |
-| 4 | `analysis/04_phenotyping.Rmd` — UMAP, phenograph clustering, label transfer from MapMetSC, two-pass cluster annotation | `spe_04_phenotyping.rds` |
+| 4 | `analysis/04_phenotyping.Rmd` — UMAP, phenograph clustering (k = 15 / 30 / 45 / 60), label transfer from MapMetSC, two-pass cluster annotation | `spe_04_phenotyping.rds` |
 | 5.1 | `analysis/05.1_correlation_Fetahu.Rmd` — SingleR against NB-BM scRNA-seq ([Fetahu et al.](https://doi.org/10.1038/s41467-023-39210-0)) | figures |
 | 5.2 | `analysis/05.2_correlation_Lee.Rmd` — SingleR against healthy-BM scRNA-seq ([Lee et al.](https://doi.org/10.3389/fimmu.2023.1127879)) | figures |
 | 6 | `analysis/06_generate_images.Rmd` — marker / cell-type / metacluster images of selected BM images | figures |
@@ -46,7 +46,7 @@ the output folder.
   correlation step, the spatial analysis, the cell–cell communication analysis,
   and the primary-tumor community / differential-abundance steps.
 * QC thresholds are the BM ones of MapMetSC.
-* Frozen intermediaries (`kept_cells_BM.rds`, `pg_clusters_BM.rds`) are created
+* Frozen intermediaries (`kept_cells_BM.rds`, `pg_clusters_BM_k<k>.rds`) are created
   by the pipeline itself on its first run (see
   [`data/R_intermediary/README.md`](data/R_intermediary/README.md)).
 * The cluster → cell type annotation is new for MapMet2 (two-pass, below), with
@@ -122,21 +122,30 @@ tested route.
 1. **First run.** `run_analysis.R` renders steps 1–4. On this first run:
    * `02_QC_1` freezes the kept-cell list (lost-cell clusters chosen by an
      IMC-DNA heuristic, shown in its heatmap);
-   * `04_phenotyping` freezes the phenograph clusters and writes
-     `<output>/annotation/cluster_annotation_BM_template.xlsx`. The template
-     holds per-cluster cell counts and percentages per timepoint, plus the most
+   * `04_phenotyping` clusters the cells with phenograph for k = 15, 30, 45 and
+     60 (`k_values` in `run_analysis.R`), freezes each clustering and writes
+     `<output>/annotation/cluster_annotation_BM_template.xlsx`. Its first tab
+     `annotation` is empty; then come one tab per k (`k15`, `k30`, ...) with the
+     clusters of that k: cell counts and percentages per timepoint, plus the most
      frequent transferred MapMetSC label when `MAPMET2_REFERENCE` is set;
    * steps 5–6 are skipped.
 2. **Check and annotate.** Inspect the bubble plots and heatmaps in
    `<output>/plots/02_QC_1/` and `<output>/plots/04_phenotyping/`.
    * If the lost-cell heuristic picked the wrong cluster(s), set
      `lost_cell_clusters` in `run_analysis.R` and delete
-     `R_intermediary/pg_clusters_BM.rds`.
-   * To split mixed clusters, set `gmm_subclusters` in `run_analysis.R`.
-   * Fill in `celltype` and `metacluster` for every cluster. Use the MapMetSC
+     `R_intermediary/pg_clusters_BM_k*.rds`.
+   * Compare the k values (UMAPs, bubble plots and heatmaps per k in
+     `<output>/plots/04_phenotyping/`) and fill in `celltype` and `metacluster`
+     for every cluster in the tab of the k you choose. Use the MapMetSC
      metacluster names where they apply; `tumor` and `other` are used by the
      correlation steps.
-   * Save the file as `<output>/R_intermediary/cluster_annotation_BM.xlsx`.
+   * To split mixed clusters, set `gmm_subclusters` in `run_analysis.R`, giving
+     the k of the clusters (e.g. `list(list(k = 30, cluster = "5", new = "35",
+     markers = c("CD3_")))`); the subclusters appear as extra rows in that k's
+     tab after the next run.
+   * Copy the rows of the chosen k (with the `k` and `cluster` columns) into the
+     **first tab** — the only tab the script reads — and save the workbook as
+     `<output>/R_intermediary/cluster_annotation_BM.xlsx`.
 3. **Second run.** Run `run_analysis.R` again: the frozen intermediaries are
    reused, the annotation is applied and steps 4–6 complete.
 
