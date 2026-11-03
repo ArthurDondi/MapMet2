@@ -15,3 +15,5 @@ docker_command.txt
 # SLURM logs (run_mapmet2_slurm.sh) and RStudio-Server scratch dirs (apptainer/README.md)
 logs/
 rstudio-run/
+# R default graphics device output
+Rplots.pdf
