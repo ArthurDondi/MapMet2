@@ -34,6 +34,9 @@ analyses the diagnostic primary tumors; both build on data processed with
 
 Shared colors and the timepoint labels are defined once in
 `analysis/00_MapMet_color_code.R`; the bubble-plot helper is `code/bubbleplot.R`.
+Every UMAP plot shows the same random subset of at most `umap_max_cells` cells
+(default 50,000, set in `run_analysis.R`); the UMAP embedding itself is
+computed on all cells.
 Each script reads the object written by the previous step, so the steps run in
 order. Rendered HTML goes to `docs/`, objects and figures (`plots/<step>/`) to
 the output folder.
@@ -131,6 +134,11 @@ tested route.
    * steps 5–6 are skipped.
 2. **Check and annotate.** Inspect the bubble plots and heatmaps in
    `<output>/plots/02_QC_1/` and `<output>/plots/04_phenotyping/`.
+   * Which lost-cell clusters were excluded is recorded in
+     `<output>/plots/02_QC_1/<date>_lost_cell_clusters.csv` (one row per QC
+     cluster: cells, mean IMC DNA and DAPI, flagged by the heuristic, cells
+     excluded), in the job's `.err` log (`[02_QC_1] lost-cell exclusion ...`) and
+     in `docs/02_QC_1.html`.
    * If the lost-cell heuristic picked the wrong cluster(s), set
      `lost_cell_clusters` in `run_analysis.R` and delete
      `R_intermediary/pg_clusters_BM_k*.rds`.

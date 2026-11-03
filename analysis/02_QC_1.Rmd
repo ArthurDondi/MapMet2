@@ -29,16 +29,26 @@ date_prefix <- format(Sys.Date(), "%Y%m%d")
 # Save a plot (ggplot / Heatmap / base R)
 save_plot <- function(plot_obj, filename, width = 8, height = 6, dpi = 300) {
   full_path <- file.path(plot_dir, paste0(date_prefix, "_", filename))
+  is_png    <- grepl("\\.png$", full_path, ignore.case = TRUE)
 
   if (inherits(plot_obj, "ggplot")) {
     ggsave(full_path, plot = plot_obj, width = width, height = height, dpi = dpi, bg = "white")
   } else if (inherits(plot_obj, "Heatmap") || inherits(plot_obj, "HeatmapList")) {
-    # ComplexHeatmap -> PDF
-    pdf(full_path, width = width, height = height)
+    # ComplexHeatmap: open the device that matches the file extension
+    if (is_png) {
+      png(full_path, width = width, height = height, units = "in", res = dpi)
+    } else {
+      pdf(full_path, width = width, height = height)
+    }
     draw(plot_obj)
     dev.off()
   } else {
-    dev.copy(png, full_path, width = width * dpi, height = height * dpi, res = dpi)
+    # already drawn (base R): copy the current device into the matching file type
+    if (is_png) {
+      dev.copy(png, full_path, width = width * dpi, height = height * dpi, res = dpi)
+    } else {
+      dev.copy(pdf, full_path, width = width, height = height)
+    }
     dev.off()
   }
   message("Saved: ", full_path)
@@ -226,6 +236,8 @@ The cluster with DAPI signal but no IMC markers in the heatmap above is the "los
 2. the frozen `kept_cells_BM.rds` (in `MAPMET2_INTERMEDIARY`, `<input>/R_intermediary`, `<input>/../R_intermediary` or `<output>/R_intermediary`);
 3. the IMC-DNA heuristic above (first run). The resulting list is frozen to `<output>/R_intermediary/kept_cells_BM.rds`.
 
+The decision is recorded in `plots/02_QC_1/<date>_lost_cell_clusters.csv` - one row per QC cluster with its cell count, mean IMC DNA and DAPI, whether the heuristic flagged it, and how many of its cells were excluded - as one line in the job log (`[02_QC_1] lost-cell exclusion ...`), and in the table below.
+
 ```{r load-kept-cells, message=TRUE}
 kept_name <- "kept_cells_BM.rds"
 inter_dirs <- c(Sys.getenv("MAPMET2_INTERMEDIARY", ""),
@@ -265,6 +277,15 @@ if (length(params$lost_cell_clusters)) {
                         if (length(lost_suggested)) paste(lost_suggested, collapse = ", ") else "none", ")")
 }
 
+# Per-cluster record of the decision: how many cells of each QC cluster were excluded
+all_clusters <- as.character(spe$pg_clusters_lostcells)
+lost_report  <- cluster_dna
+lost_report$suggested_lost <- lost_report$cluster %in% lost_suggested
+lost_report$n_excluded     <- as.integer(table(factor(all_clusters[!keep], levels = lost_report$cluster)))
+lost_report$pct_excluded   <- round(100 * lost_report$n_excluded / lost_report$n_cells, 1)
+lost_report$decision       <- kept_source
+excluded_clusters <- lost_report$cluster[lost_report$n_excluded > 0]
+
 spe <- spe[, keep]
 message("Lost-cell exclusion via ", kept_source, ": kept ", ncol(spe), " of ", n_before,
         " post-QC1 cells.")
@@ -275,6 +296,21 @@ if (!startsWith(kept_source, "frozen list")) {
   saveRDS(colnames(spe), file.path(freeze_dir, kept_name))
   message("Saved frozen kept-cell list: ", file.path(freeze_dir, kept_name))
 }
+
+# Written record: CSV next to the plots, plus one line in the job log (stderr)
+report_file <- file.path(plot_dir, paste0(date_prefix, "_lost_cell_clusters.csv"))
+write.csv(lost_report, report_file, row.names = FALSE)
+cat(sprintf("[02_QC_1] lost-cell exclusion via %s: kept %d of %d cells; clusters with excluded cells: %s; report: %s\n",
+            kept_source, ncol(spe), n_before,
+            if (length(excluded_clusters)) paste(excluded_clusters, collapse = ", ") else "none",
+            report_file), file = stderr())
+
+knitr::kable(lost_report[lost_report$n_excluded > 0 | lost_report$suggested_lost,
+                         c("cluster", "n_cells", "imc_dna", "if_dapi", "imc_dna_rel",
+                           "suggested_lost", "n_excluded", "pct_excluded")],
+             digits = 3, row.names = FALSE,
+             caption = paste0("Excluded lost cells per QC cluster (", kept_source, "); full table: ",
+                              basename(report_file)))
 ```
 
 ### DNA-intensity check

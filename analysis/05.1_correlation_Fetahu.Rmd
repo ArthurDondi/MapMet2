@@ -10,6 +10,8 @@ params:
   input: !r Sys.getenv("MAPMET2_INPUT", "/mnt/data/input_all")
   output: !r Sys.getenv("MAPMET2_OUTPUT", "/mnt/data/output_mapmet2")
   public: !r Sys.getenv("MAPMET2_PUBLIC", "/mnt/data/public_datasets")
+  # Maximum number of cells drawn per UMAP plot (random subset)
+  umap_max_cells: 50000
 ---
 
 ```{r setup, include=FALSE}
@@ -161,7 +163,10 @@ h_rna
 ```
 
 ```{r umap-rna}
-p_umap_rna <- DimPlot(rna, reduction="UMAP", cols=col_clusters) +
+# draw at most params$umap_max_cells reference cells (colours matched by name)
+set.seed(221228)
+rna_umap_cells <- if (ncol(rna) > params$umap_max_cells) sample(colnames(rna), params$umap_max_cells) else colnames(rna)
+p_umap_rna <- DimPlot(rna, reduction="UMAP", cols=col_clusters, cells = rna_umap_cells) +
   # Harmonised square panel border (all UMAPs).
   theme(axis.line    = element_blank(),
         panel.border = element_rect(colour = "black", fill = NA, size = 0.5))
@@ -208,7 +213,10 @@ metadata(protein)$color_vectors$col_predicted_meta <- col_metacluster
 We will plot the predicted metaclusters in a UMAP.
 
 ```{r predicted-umap}
-p1 <- dittoDimPlot(protein, var = "predicted_metacluster", 
+# draw a random subset of at most params$umap_max_cells cells
+set.seed(221228)
+umap_cells <- sort(sample(ncol(protein), min(params$umap_max_cells, ncol(protein))))
+p1 <- dittoDimPlot(protein[, umap_cells], var = "predicted_metacluster", 
              reduction.use = "UMAP", size = 0.3, labels.size=2,
              do.label = F,
              order = "randomize",

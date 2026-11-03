@@ -10,6 +10,8 @@ params:
   input: !r Sys.getenv("MAPMET2_INPUT", "/mnt/data/input_all")
   output: !r Sys.getenv("MAPMET2_OUTPUT", "/mnt/data/output_mapmet2")
   public: !r Sys.getenv("MAPMET2_PUBLIC", "/mnt/data/public_datasets")
+  # Maximum number of cells drawn per UMAP plot (random subset)
+  umap_max_cells: 50000
 ---
 
 ```{r setup, include=FALSE}
@@ -152,7 +154,10 @@ h_rna
 ```
 
 ```{r umap-rna, fig.width=15, fig.height=10}
-p_umap_rna <- DimPlot(rna, reduction="umap", cols=col_clust) +
+# draw at most params$umap_max_cells reference cells (colours matched by name)
+set.seed(221228)
+rna_umap_cells <- if (ncol(rna) > params$umap_max_cells) sample(colnames(rna), params$umap_max_cells) else colnames(rna)
+p_umap_rna <- DimPlot(rna, reduction="umap", cols=col_clust, cells = rna_umap_cells) +
   # Closed panel border (all UMAPs); size, not linewidth, for the older ggplot2
   theme(axis.line    = element_blank(),
         panel.border = element_rect(colour = "black", fill = NA, size = 0.5))
@@ -202,7 +207,7 @@ protein[,protein$metacluster=="other"]$celltype_predicted <- "other"
 protein[,rownames(predicted_labels)]$celltype_predicted <- predicted_labels$labels
 metadata(protein)$color_vectors$col_predicted_label <- col_clust
 
-# UMAP of all cells coloured by predicted label. Tumor/other background cells are
+# UMAP coloured by predicted label (random subset of cells). Tumor/other background cells are
 # drawn first (bottom) so the Lee-predicted cells sit on top, and listed last in the legend.
 col_pred  <- metadata(protein)$color_vectors$col_predicted_label
 bg_types  <- intersect(c("tumor", "other"), as.character(protein$celltype_predicted))
@@ -213,6 +218,9 @@ umap_df <- data.frame(
   UMAP_2 = SingleCellExperiment::reducedDim(protein, "UMAP")[, 2],
   label  = as.character(protein$celltype_predicted)
 )
+# draw a random subset of at most params$umap_max_cells cells
+set.seed(221228)
+umap_df <- umap_df[sort(sample(nrow(umap_df), min(params$umap_max_cells, nrow(umap_df)))), ]
 
 pred_levels  <- c(lee_types, bg_types)                     # Lee types first, tumor/other last
 umap_df$pred <- factor(umap_df$label, levels = pred_levels)

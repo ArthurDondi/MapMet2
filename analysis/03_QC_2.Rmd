@@ -26,16 +26,26 @@ date_prefix <- format(Sys.Date(), "%Y%m%d")
 # Save a plot (ggplot / Heatmap / base R)
 save_plot <- function(plot_obj, filename, width = 8, height = 6, dpi = 300) {
   full_path <- file.path(plot_dir, paste0(date_prefix, "_", filename))
+  is_png    <- grepl("\\.png$", full_path, ignore.case = TRUE)
 
   if (inherits(plot_obj, "ggplot")) {
     ggsave(full_path, plot = plot_obj, width = width, height = height, dpi = dpi, bg = "white")
   } else if (inherits(plot_obj, "Heatmap") || inherits(plot_obj, "HeatmapList")) {
-    # ComplexHeatmap -> PDF
-    pdf(full_path, width = width, height = height)
+    # ComplexHeatmap: open the device that matches the file extension
+    if (is_png) {
+      png(full_path, width = width, height = height, units = "in", res = dpi)
+    } else {
+      pdf(full_path, width = width, height = height)
+    }
     draw(plot_obj)
     dev.off()
   } else {
-    dev.copy(png, full_path, width = width * dpi, height = height * dpi, res = dpi)
+    # already drawn (base R): copy the current device into the matching file type
+    if (is_png) {
+      dev.copy(png, full_path, width = width * dpi, height = height * dpi, res = dpi)
+    } else {
+      dev.copy(pdf, full_path, width = width, height = height)
+    }
     dev.off()
   }
   message("Saved: ", full_path)

@@ -29,6 +29,9 @@ params:
   gmm_subclusters: !r list()
   # Maximum number of reference cells per MapMetSC cell type for SingleR.
   transfer_max_per_celltype: 5000
+  # Maximum number of cells drawn per UMAP plot (one fixed random subset for all
+  # plots); the UMAP embedding itself is computed on all cells.
+  umap_max_cells: 50000
 ---
 
 ```{r setup, include=FALSE}
@@ -171,7 +174,12 @@ mat_red <- calculateUMAP(
 rownames(mat_red) <- colnames(spe)
 reducedDim(spe, "UMAP") <- mat_red
 
-p <- dittoDimPlot(spe, var = "fm_id",
+# Cells drawn in the UMAP plots: one fixed random subset (the embedding above
+# uses all cells), so the plots stay readable with hundreds of thousands of cells
+set.seed(221228)
+umap_cells <- sort(sample(ncol(spe), min(params$umap_max_cells, ncol(spe))))
+
+p <- dittoDimPlot(spe[, umap_cells], var = "fm_id",
              reduction.use = "UMAP", size = 1,
              do.label = TRUE,
              legend.show=F) +
@@ -184,16 +192,19 @@ p
 
 ```
 
+All UMAP plots in this step show the same random subset of `r length(umap_cells)` of the `r ncol(spe)` cells (`params$umap_max_cells`); the embedding itself was computed on all cells.
+
 The same UMAP colored by timepoint shows whether cells of the BM controls, diagnosis, treatment and relapse samples overlap.
 
 ```{r umap-timepoint}
 spe$timepoint_plot <- factor(spe$timepoint, levels = tp_levels)
 
-p_tp <- dittoDimPlot(spe, var = "timepoint_plot",
+p_tp <- dittoDimPlot(spe[, umap_cells], var = "timepoint_plot",
              reduction.use = "UMAP", size = 0.3,
              order = "randomize",
-             color.panel = unname(col_timepoint[tp_levels]),
              legend.show = TRUE) +
+  scale_colour_manual(values = col_timepoint) +   # matched by name
+  guides(colour = guide_legend(override.aes = list(size = 3))) +
   theme(legend.title = element_blank(), aspect.ratio = 1) +
   ggtitle("Timepoint on UMAP")
 
@@ -212,8 +223,8 @@ marker_vars <- rownames(spe)[
 ]
 
 set.seed(221228)
-marker_umap_ncells <- min(max_cells_for_umap, ncol(spe))
-marker_umap_idx <- sample(seq_len(ncol(spe)), marker_umap_ncells)
+marker_umap_ncells <- min(max_cells_for_umap, length(umap_cells))
+marker_umap_idx <- sample(umap_cells, marker_umap_ncells)
 spe_umap_markers <- spe[, marker_umap_idx]
 
 p_markers <- multi_dittoDimPlot(
@@ -285,6 +296,7 @@ umap_clusters <- function(object, var, cols, title) {
     size = 0.5, do.label = TRUE, legend.show = FALSE,
     color.panel = cols
   ) +
+    scale_colour_manual(values = cols) +   # matched by name: clusters absent from the subset are fine
     theme(legend.title = element_blank()) +
     ggtitle(title)
   label_layer <- which(
@@ -304,7 +316,7 @@ for (k in k_values) {
   metadata(spe)$color_vectors[[paste0("col_", raw_col)]] <- cols_k
 
   spe$pg_plot <- factor(colData(spe)[[raw_col]], levels = levels_k)
-  p <- umap_clusters(spe, "pg_plot", cols_k, paste0("Phenograph clusters (k = ", k, ") on UMAP"))
+  p <- umap_clusters(spe[, umap_cells], "pg_plot", cols_k, paste0("Phenograph clusters (k = ", k, ") on UMAP"))
   save_plot(p, paste0("umap_pg_clusters_k", k, ".pdf"), width = 8, height = 6)
   print(p)
 
@@ -502,7 +514,7 @@ for (k in k_gmm) {
 
   # UMAP after subclustering
   spe$pg_plot <- factor(colData(spe)[[col_k]], levels = lv)
-  p_after <- umap_clusters(spe, "pg_plot", cols,
+  p_after <- umap_clusters(spe[, umap_cells], "pg_plot", cols,
                            paste0("Phenograph clusters (k = ", k, ") after subclustering on UMAP"))
   save_plot(p_after, paste0("umap_pg_clusters_k", k, "_after_subclustering.pdf"), width = 8, height = 6)
   print(p_after)
@@ -614,11 +626,12 @@ if (!nzchar(ref_path)) {
 
   # Transferred cell types on the UMAP
   col_transfer <- complete_palette(spe$celltype_transfer, COL_CELLTYPE)
-  p_tr <- dittoDimPlot(spe, var = "celltype_transfer",
+  p_tr <- dittoDimPlot(spe[, umap_cells], var = "celltype_transfer",
                reduction.use = "UMAP", size = 0.3,
                order = "randomize",
-               color.panel = unname(col_transfer[sort(unique(spe$celltype_transfer))]),
                legend.show = TRUE) +
+    scale_colour_manual(values = col_transfer) +   # matched by name
+    guides(colour = guide_legend(override.aes = list(size = 3))) +
     theme(legend.title = element_blank(), aspect.ratio = 1) +
     ggtitle("Transferred MapMetSC cell types (SingleR) on UMAP")
   save_plot(p_tr, "umap-celltype-transfer.pdf", width = 16, height = 8)
@@ -888,7 +901,7 @@ plot_cluster_bubble(
 
 ```{r umap-final-celltypes, fig.width=10}
 # aspect.ratio = 1 keeps the UMAP panel square regardless of legend width.
-p1 <- dittoDimPlot(spe, var = "celltype_ordered",
+p1 <- dittoDimPlot(spe[, umap_cells], var = "celltype_ordered",
              reduction.use = "UMAP", size = 0.3,
              do.label = F,
              order = "randomize",
@@ -905,7 +918,7 @@ p1
 We also plot the same celltype UMAP split by timepoint (control BM, DE, T1, T2, REL).
 
 ```{r umap-celltypes-by-timepoint, fig.width=16, fig.height=10}
-p1_tp <- dittoDimPlot(spe, var = "celltype_ordered",
+p1_tp <- dittoDimPlot(spe[, umap_cells], var = "celltype_ordered",
              reduction.use = "UMAP", size = 0.3,
              split.by = "timepoint_plot",
              do.label = F,
@@ -921,7 +934,7 @@ p1_tp
 ```
 
 ```{r vis-metacluster}
-p2 <- dittoDimPlot(spe, var = "metacluster",
+p2 <- dittoDimPlot(spe[, umap_cells], var = "metacluster",
              reduction.use = "UMAP", size = 0.3, labels.size=4,
              do.label = F,
              order = "randomize",
