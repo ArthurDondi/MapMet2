@@ -234,41 +234,49 @@ save_plot(p, "DNA_markers_rawdata.png", width = 24, height = 12)
 
 # Patient cohort overview {#cohort-overview}
 
-We summarise the NB-patient BM cohort (control samples excluded) in a single overview figure, one column per patient: age at diagnosis as a bar plot, the availability of a BM sample at each timepoint (DE, T1, T2, REL), and sex together with the key genetic / clinical tracks (MYCN amplification, 1p loss and progression) as colored tiles. The table is built from the sample- and patient-level metadata (`meta`), restricted to the BM samples imaged in this dataset.
+We summarise the BM cohort in a single overview figure, one column per individual: the NB patients (left) and the normal control BM samples (right). It shows age at diagnosis as a bar plot, the availability of a BM sample at each timepoint (DE, T1, T2, REL) and of a control BM sample, and sex together with the key genetic / clinical tracks (MYCN amplification, 1p loss and progression) as colored tiles; the genetic / clinical tracks do not apply to the controls and are left blank. The table is built from the sample- and patient-level metadata (`meta`), restricted to the BM samples imaged in this dataset.
 
 ```{r cohort-table}
-# NB-patient BM samples with images in this dataset (controls excluded)
-bm_samples <- unique(paste(spe$fm_id, spe$tissue)[spe$timepoint != "control"])
+# BM samples with images in this dataset: NB patients and control BM
+bm_samples <- unique(paste(spe$fm_id, spe$tissue))
 tp_cols    <- setdiff(TIMEPOINT_LEVELS, "control")   # DE, T1, T2, REL
 
 bm_meta <- meta %>%
   filter(paste(Sample_ID, Tissue) %in% bm_samples) %>%
-  mutate(timepoint = relabel_timepoint(Timepoint, control))
+  mutate(timepoint  = relabel_timepoint(Timepoint, control),
+         # one column per individual (the sample ID if there is no patient ID)
+         patient_id = ifelse(is.na(Patient_ID), paste0("sample_", Sample_ID),
+                             as.character(Patient_ID)))
 
-# Sample availability: one row per patient, one yes/no column per timepoint
+# Availability tracks: the patient timepoints, plus control BM when present
+avail_cols <- c(tp_cols, if (any(bm_meta$timepoint == "control")) "control")
+
+# Sample availability: one row per individual, one yes/no column per track
 avail <- bm_meta %>%
-  filter(timepoint %in% tp_cols) %>%
-  distinct(Patient_ID, timepoint) %>%
+  filter(timepoint %in% avail_cols) %>%
+  distinct(patient_id, timepoint) %>%
   mutate(present = "yes") %>%
-  pivot_wider(names_from = timepoint, values_from = present, values_fill = "no") %>%
-  mutate(patient_id = as.character(Patient_ID)) %>%
-  select(-Patient_ID)
-for (tp in setdiff(tp_cols, colnames(avail))) avail[[tp]] <- "no"
+  pivot_wider(names_from = timepoint, values_from = present, values_fill = "no")
+for (tp in setdiff(avail_cols, colnames(avail))) avail[[tp]] <- "no"
 
 cohort <- bm_meta %>%
-  distinct(Patient_ID, .keep_all = TRUE) %>%
-  transmute(
-    patient_id = as.character(Patient_ID),
-    age        = round(as.numeric(age_at_diag)),
-    sex        = as.character(sex_aab),
-    mycn       = as.character(MYCN_amp),
-    loss1p     = as.character(X1p_loss),
-    prog       = as.character(efs)
+  group_by(patient_id) %>%
+  summarise(
+    group  = if (any(timepoint == "control")) "control BM" else "NB patients",
+    age    = round(as.numeric(first(age_at_diag))),
+    sex    = as.character(first(sex_aab)),
+    mycn   = as.character(first(MYCN_amp)),
+    loss1p = as.character(first(X1p_loss)),
+    prog   = as.character(first(efs)),
+    .groups = "drop"
   ) %>%
   inner_join(avail, by = "patient_id")
 
-# Order patients by their sample-availability pattern (DE, T1, T2, REL), then ID
-ord    <- do.call(order, c(lapply(tp_cols, function(tp) cohort[[tp]] != "yes"),
+# Order: NB patients, then controls; within a group by sample-availability
+# pattern (DE, T1, T2, REL), then ID
+cohort$group <- factor(cohort$group, levels = c("NB patients", "control BM"))
+ord    <- do.call(order, c(list(cohort$group),
+                           lapply(tp_cols, function(tp) cohort[[tp]] != "yes"),
                            list(cohort$patient_id)))
 cohort <- cohort[ord, ]
 
@@ -284,6 +292,10 @@ cohort$mycn   <- recode_ynh(cohort$mycn)
 cohort$loss1p <- recode_ynh(cohort$loss1p)
 cohort$prog   <- recode_ynh(cohort$prog)
 
+# Not applicable to the controls: leave these tiles blank (NA), not "unknown"
+is_ctrl <- cohort$group == "control BM"
+cohort$mycn[is_ctrl] <- cohort$loss1p[is_ctrl] <- cohort$prog[is_ctrl] <- NA
+
 # sex -> f / m
 cohort$sex <- dplyr::recode(as.character(cohort$sex),
   "1" = "f", "2" = "m", "female" = "f", "male" = "m", "F" = "f", "M" = "m",
@@ -296,22 +308,27 @@ cohort$mycn   <- factor(cohort$mycn,   levels = lvl_ynh)
 cohort$loss1p <- factor(cohort$loss1p, levels = lvl_ynh)
 cohort$prog   <- factor(cohort$prog,   levels = lvl_ynh)
 cohort$sex    <- factor(cohort$sex,    levels = c("f", "m"))
-for (tp in tp_cols) cohort[[tp]] <- factor(cohort[[tp]], levels = c("yes", "no"))
+for (tp in avail_cols) cohort[[tp]] <- factor(cohort[[tp]], levels = c("yes", "no"))
 
-message(nrow(cohort), " NB patients with at least one BM sample; samples per timepoint: ",
-        paste(tp_cols, vapply(tp_cols, function(tp) sum(cohort[[tp]] == "yes"), numeric(1)),
+message(sum(!is_ctrl), " NB patients with at least one BM sample and ", sum(is_ctrl),
+        " control BM donors; individuals with a sample per track: ",
+        paste(avail_cols, vapply(avail_cols, function(tp) sum(cohort[[tp]] == "yes"), numeric(1)),
               sep = " = ", collapse = ", "))
 ```
 
-The panels share the same discrete x-axis (one column per patient) and are stacked with `patchwork`, with identical legends collected into one.
+The panels share the same discrete x-axis (one column per individual, NB patients and control BM as two blocks) and are stacked with `patchwork`, with identical legends collected into one.
 
-```{r cohort-overview-figure, fig.width=9, fig.height=3.2}
+```{r cohort-overview-figure, fig.width=9, fig.height=3.4}
 # Shared x-axis expansion so panels align column-by-column.
 X_EXPAND <- expansion(add = 0.5)
+# NB patients | control BM as two blocks; column widths stay equal across panels
+GROUP_FACET <- facet_grid(. ~ group, scales = "free_x", space = "free_x")
 
 max_age <- max(cohort$age, na.rm = TRUE)
 p_age <- ggplot(cohort, aes(x = patient_id, y = age)) +
-  geom_col(fill = "grey35", width = 0.8) +
+  geom_blank(aes(y = 0)) +   # keeps every column (incl. controls without age) in the layout
+  geom_col(data = function(x) x[!is.na(x$age), ], fill = "grey35", width = 0.8) +
+  GROUP_FACET +
   scale_x_discrete(expand = X_EXPAND) +
   scale_y_continuous(breaks = c(0, max_age),
                      expand = expansion(mult = c(0, 0.05))) +
@@ -324,12 +341,15 @@ p_age <- ggplot(cohort, aes(x = patient_id, y = age)) +
     axis.text.y  = element_text(size = 7),
     axis.title.y = element_text(angle = 0, vjust = 0.5, hjust = 1, size = 8),
     panel.grid   = element_blank(),
+    strip.text   = element_text(size = 8, face = "bold"),
+    panel.spacing.x = unit(3, "mm"),
     plot.margin  = margin(2, 2, 0, 2)
   )
 
 tile_track <- function(var, fill_vals, breaks, legend_name, y_lab) {
   ggplot(cohort, aes(x = patient_id, y = 1, fill = .data[[var]])) +
     geom_tile(color = "white", linewidth = 0.4) +
+    GROUP_FACET +
     scale_x_discrete(expand = X_EXPAND) +
     scale_fill_manual(values = fill_vals, breaks = breaks, name = legend_name,
                       na.value = "white", drop = FALSE) +
@@ -342,12 +362,14 @@ tile_track <- function(var, fill_vals, breaks, legend_name, y_lab) {
       legend.text      = element_text(size = 7),
       legend.title     = element_text(size = 8, face = "bold"),
       axis.title.y     = element_text(angle = 0, vjust = 0.5, hjust = 1, size = 8),
+      strip.text       = element_blank(),   # group labels only on the top panel
+      panel.spacing.x  = unit(3, "mm"),
       plot.margin      = margin(0, 2, 0, 2)
     )
 }
 
-# One availability track per timepoint (shared yes/no legend)
-p_avail <- lapply(tp_cols, function(tp)
+# One availability track per timepoint, then control BM (shared yes/no legend)
+p_avail <- lapply(avail_cols, function(tp)
   tile_track(tp, COL_AVAIL, c("yes", "no"), "BM sample", paste0("BM (", tp, ")")))
 
 p_sex  <- tile_track("sex",    COL_SEX, c("f", "m"), "sex (AAB)",             "sex (AAB)")
@@ -363,7 +385,8 @@ p_cohort <- wrap_plots(c(list(p_age), p_avail, list(p_sex, p_mycn, p_1p, p_prog)
 
 p_cohort
 
-save_plot(p_cohort, "cohort_overview.pdf", width = 9, height = 3.2)
+# wider for large cohorts (~0.075 in per column)
+save_plot(p_cohort, "cohort_overview.pdf", width = max(9, 2.5 + 0.075 * nrow(cohort)), height = 3.4)
 ```
 
 ## Save object

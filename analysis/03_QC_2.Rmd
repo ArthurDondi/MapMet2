@@ -170,7 +170,7 @@ save_plot(p, "example_large_cell.png", width = 12, height = 12)
 p
 ```
 
-In the images above, we can see that segmentation artifacts occur, where no clear cell borders can be identified. For BM, MapMetSC determined an upper threshold of **15,600** and a lower threshold of **333** for nuclear area (the original Lazic et al. analysis used 250 as lower threshold). To examine nuclei with an area below the lower threshold, it is better to visualize images in napari and use the label and zoom function; the smallest nucleus is reported below.
+In the images above, we can see that segmentation artifacts occur, where no clear cell borders can be identified. For BM, we use MapMetSC's thresholds for nuclear area: a lower threshold of **333 px** and an upper threshold of **15,600 px** (the original Lazic et al. analysis used 250 px as lower threshold). To examine nuclei with an area below the lower threshold, it is better to visualize images in napari and use the label and zoom function; the smallest nucleus is reported below.
 
 ```{r quality-control-outliers-small, message=FALSE}
 feat <- "area"
@@ -184,7 +184,7 @@ print(paste("The outlier cell with ", feat, "=", morph_mat_order[outlier_cell], 
 Let's exclude outliers from the SPE object and the morph. feature matrix based on defined thresholds.
 
 ```{r exclude-outliers}
-# Nuclear-area thresholds for BM (MapMetSC, 03_QC_2)
+# Nuclear-area thresholds for BM, in px (as in MapMetSC's 03_QC_2)
 area_min <- 333
 area_max <- 15600
 
