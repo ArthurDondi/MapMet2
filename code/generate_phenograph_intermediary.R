@@ -10,7 +10,8 @@
 # this script re-extracts them from the saved objects, e.g. to ship them with
 # the data (params$input/R_intermediary/) or after copying objects around.
 #
-# Produces: kept_cells_BM.rds, pg_clusters_BM_k<k>.rds (one per clustered k)
+# Produces: kept_cells_BM.rds, pg_clusters_BM_k<k>.rds (one per clustered k),
+#           umap_BM.rds (the UMAP embedding of 04_phenotyping)
 # =============================================================================
 
 suppressPackageStartupMessages(library(SpatialExperiment))
@@ -29,9 +30,9 @@ extract_kept <- function(spe02_path, out_name) {
   message(sprintf("wrote %s  (%d kept cells)", out_name, ncol(spe02)))
 }
 
-## ---- phenotyping: the labels per k BEFORE GMM subclustering -----------------
-# MapMet2's 04 stores them in pg_raw_k<k> (pg_clusters_k<k> adds the optional
-# GMM subclusters).
+## ---- phenotyping: the labels per k BEFORE GMM subclustering, and the UMAP ---
+# MapMet2's 04 stores the labels in pg_raw_k<k> (pg_clusters_k<k> adds the
+# optional GMM subclusters) and the embedding in reducedDim(spe, "UMAP").
 extract_pheno <- function(spe_paths) {
   spe_path <- spe_paths[file.exists(spe_paths)][1]
   if (is.na(spe_path)) {
@@ -47,6 +48,15 @@ extract_pheno <- function(spe_paths) {
     saveRDS(v, file.path(inter_dir, out_name))
     message(sprintf("wrote %s  (%d cells, %d clusters; from %s col %s)",
                     out_name, length(v), length(unique(v)), basename(spe_path), col))
+  }
+  if ("UMAP" %in% reducedDimNames(spe)) {
+    u <- reducedDim(spe, "UMAP")
+    rownames(u) <- colnames(spe)
+    # the attributes 04_phenotyping checks before reusing the embedding
+    attr(u, "channels")    <- rownames(spe)[rowData(spe)$use_channel]
+    attr(u, "n_neighbors") <- 30
+    saveRDS(u, file.path(inter_dir, "umap_BM.rds"))
+    message(sprintf("wrote umap_BM.rds  (%d cells; from %s)", nrow(u), basename(spe_path)))
   }
 }
 

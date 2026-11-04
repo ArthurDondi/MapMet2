@@ -36,7 +36,7 @@ Shared colors and the timepoint labels are defined once in
 `analysis/00_MapMet_color_code.R`; the bubble-plot helper is `code/bubbleplot.R`.
 Every UMAP plot shows the same random subset of at most `umap_max_cells` cells
 (default 20,000, set in `run_analysis.R`); the UMAP embedding itself is
-computed on all cells.
+computed on all cells, once, and then reused from `R_intermediary/umap_BM.rds`.
 Each script reads the object written by the previous step, so the steps run in
 order. Rendered HTML goes to `docs/`, objects and figures (`plots/<step>/`) to
 the output folder.
@@ -49,7 +49,8 @@ the output folder.
   correlation step, the spatial analysis, the cell–cell communication analysis,
   and the primary-tumor community / differential-abundance steps.
 * QC thresholds are the BM ones of MapMetSC.
-* Frozen intermediaries (`kept_cells_BM.rds`, `pg_clusters_BM_k<k>.rds`) are created
+* Frozen intermediaries (`kept_cells_BM.rds`, `pg_clusters_BM_k<k>.rds`,
+  `umap_BM.rds`) are created
   by the pipeline itself on its first run (see
   [`data/R_intermediary/README.md`](data/R_intermediary/README.md)).
 * The cluster → cell type annotation is new for MapMet2 (two-pass, below), with

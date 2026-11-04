@@ -158,20 +158,53 @@ To get a first look at the single-cell data, we compute a UMAP embedding (used f
 
 ## UMAP (for visualization only)
 ```{r umap}
-set.seed(221228)
+umap_n_neighbors <- 30
 
-Sys.setenv(OMP_NUM_THREADS = 1)
-Sys.setenv(MKL_NUM_THREADS = 1)
+# The embedding is slow for hundreds of thousands of cells, so it is frozen in
+# R_intermediary (umap_BM.rds) and reused as long as it covers all cells and was
+# computed on the same channels and n_neighbors; delete the file to recompute.
+umap_name  <- "umap_BM.rds"
+umap_valid <- function(u) {
+  is.matrix(u) && all(colnames(spe) %in% rownames(u)) &&
+    identical(attr(u, "channels"), rownames(mat)) &&
+    identical(as.numeric(attr(u, "n_neighbors")), as.numeric(umap_n_neighbors))
+}
+mat_red <- NULL
+for (f in file.path(inter_dirs, umap_name)) {
+  if (!file.exists(f)) next
+  u <- readRDS(f)
+  if (umap_valid(u)) {
+    mat_red     <- u[colnames(spe), , drop = FALSE]
+    umap_source <- paste("loaded from", f)
+    break
+  }
+  message("Frozen UMAP ", f, " does not match the current cells / channels - not used.")
+}
 
-BPPARAM <- SnowParam(workers = 30, type = "SOCK", RNGseed = 221228)
+if (is.null(mat_red)) {
+  set.seed(221228)
 
-mat_red <- calculateUMAP(
-  mat,
-  n_neighbors = 30,
-  BPPARAM = BPPARAM
-)
+  Sys.setenv(OMP_NUM_THREADS = 1)
+  Sys.setenv(MKL_NUM_THREADS = 1)
 
-rownames(mat_red) <- colnames(spe)
+  BPPARAM <- SnowParam(workers = 30, type = "SOCK", RNGseed = 221228)
+
+  mat_red <- calculateUMAP(
+    mat,
+    n_neighbors = umap_n_neighbors,
+    BPPARAM = BPPARAM
+  )
+  rownames(mat_red) <- colnames(spe)
+
+  frozen <- mat_red
+  attr(frozen, "channels")    <- rownames(mat)
+  attr(frozen, "n_neighbors") <- umap_n_neighbors
+  dir.create(freeze_dir, showWarnings = FALSE, recursive = TRUE)
+  saveRDS(frozen, file.path(freeze_dir, umap_name))
+  umap_source <- paste("computed and saved to", file.path(freeze_dir, umap_name))
+}
+cat("[04_phenotyping] UMAP embedding", umap_source, "\n", file = stderr())
+
 reducedDim(spe, "UMAP") <- mat_red
 
 # Cells drawn in the UMAP plots: one fixed random subset (the embedding above
@@ -192,7 +225,7 @@ p
 
 ```
 
-All UMAP plots in this step show the same random subset of `r length(umap_cells)` of the `r ncol(spe)` cells (`params$umap_max_cells`); the embedding itself was computed on all cells.
+All UMAP plots in this step show the same random subset of `r length(umap_cells)` of the `r ncol(spe)` cells (`params$umap_max_cells`); the embedding itself covers all cells. It was `r umap_source`: it is computed once and then reused by later runs, like the phenograph clusterings.
 
 The same UMAP colored by timepoint shows whether cells of the BM controls, diagnosis, treatment and relapse samples overlap.
 

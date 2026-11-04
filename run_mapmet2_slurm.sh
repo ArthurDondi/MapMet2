@@ -55,7 +55,7 @@ PUBLIC="${MAPMET2_PUBLIC:-$DATA/Publication/public_datasets}"
 # MapMet2's OWN output folder. Keep it separate from MapMetSC's output: both
 # pipelines write spe_0*.rds objects with the same names.
 OUTPUT="${MAPMET2_OUTPUT:-$DATA/MapMet2/output}"
-# Frozen intermediaries (kept_cells_BM.rds, pg_clusters_BM_k<k>.rds) and the filled
+# Frozen intermediaries (kept_cells_BM.rds, pg_clusters_BM_k<k>.rds, umap_BM.rds) and the filled
 # cluster_annotation_BM.xlsx. The first run writes the frozen lists here.
 INTERMEDIARY="${MAPMET2_INTERMEDIARY:-$OUTPUT/R_intermediary}"
 # Optional: MapMetSC's annotated object, used as the SingleR reference for the
