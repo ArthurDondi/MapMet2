@@ -45,7 +45,7 @@ reference <- Sys.getenv("MAPMET2_REFERENCE", "")                          # MapM
 # Analysis settings, chosen after inspecting the first run (see README):
 lost_cell_clusters  <- NULL       # 02_QC_1: lost-cell clusters of that run's heatmap, e.g. c("26"); NULL = frozen list / IMC-DNA heuristic
 k_values            <- c(15, 30, 45, 60)  # 04_phenotyping: phenograph k values, one template tab each
-umap_max_cells      <- 50000      # 04 / 05.x: cells drawn per UMAP plot (random subset; the embedding uses all cells)
+umap_max_cells      <- 20000      # 04 / 05.x: cells drawn per UMAP plot (random subset; the embedding uses all cells)
 gmm_subclusters     <- list()     # 04_phenotyping: e.g. list(list(k = 30, cluster = "5", new = "35", markers = c("CD3_")))
 annotation_file     <- Sys.getenv("MAPMET2_ANNOTATION", "")               # "" = cluster_annotation_BM.xlsx in R_intermediary
 annotation_fallback <- Sys.getenv("MAPMET2_ANNOTATION_FALLBACK", "none")  # "none" (two-pass) or "transfer"

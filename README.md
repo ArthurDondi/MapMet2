@@ -35,7 +35,7 @@ analyses the diagnostic primary tumors; both build on data processed with
 Shared colors and the timepoint labels are defined once in
 `analysis/00_MapMet_color_code.R`; the bubble-plot helper is `code/bubbleplot.R`.
 Every UMAP plot shows the same random subset of at most `umap_max_cells` cells
-(default 50,000, set in `run_analysis.R`); the UMAP embedding itself is
+(default 20,000, set in `run_analysis.R`); the UMAP embedding itself is
 computed on all cells.
 Each script reads the object written by the previous step, so the steps run in
 order. Rendered HTML goes to `docs/`, objects and figures (`plots/<step>/`) to

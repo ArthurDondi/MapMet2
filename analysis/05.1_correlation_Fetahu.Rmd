@@ -11,7 +11,7 @@ params:
   output: !r Sys.getenv("MAPMET2_OUTPUT", "/mnt/data/output_mapmet2")
   public: !r Sys.getenv("MAPMET2_PUBLIC", "/mnt/data/public_datasets")
   # Maximum number of cells drawn per UMAP plot (random subset)
-  umap_max_cells: 50000
+  umap_max_cells: 20000
 ---
 
 ```{r setup, include=FALSE}

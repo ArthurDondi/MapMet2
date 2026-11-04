@@ -31,7 +31,7 @@ params:
   transfer_max_per_celltype: 5000
   # Maximum number of cells drawn per UMAP plot (one fixed random subset for all
   # plots); the UMAP embedding itself is computed on all cells.
-  umap_max_cells: 50000
+  umap_max_cells: 20000
 ---
 
 ```{r setup, include=FALSE}
