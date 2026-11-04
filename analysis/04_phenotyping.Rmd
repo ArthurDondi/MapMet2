@@ -278,10 +278,13 @@ for (k in k_values) {
   colData(spe)[[paste0("pg_raw_k", k)]] <- lab
 }
 
+cluster_sizes <- lapply(k_values, function(k) table(colData(spe)[[paste0("pg_raw_k", k)]]))
 knitr::kable(data.frame(
-  k          = k_values,
-  n_clusters = vapply(k_values, function(k) length(unique(colData(spe)[[paste0("pg_raw_k", k)]])), integer(1))
-), caption = "Number of phenograph clusters per k")
+  k                 = k_values,
+  n_clusters        = vapply(cluster_sizes, length, integer(1)),
+  smallest_cluster  = vapply(cluster_sizes, function(x) as.integer(min(x)), integer(1)),
+  clusters_below_10 = vapply(cluster_sizes, function(x) sum(x < 10), integer(1))
+), caption = "Phenograph clusters per k: number, smallest cluster (cells) and clusters with fewer than 10 cells")
 ```
 
 ```{r phenograph-umap-bubbleplot}
@@ -337,12 +340,41 @@ spe$pg_plot <- NULL
 Single-cell heatmaps (up to 8000 random cells per cluster) of the phenograph
 clusters of every k before the optional GMM subclustering. They are saved to
 `plots/04_phenotyping/heatmap_before_subclustering/k<k>/` and not shown here, to
-keep this report small.
+keep this report small. Clusters with fewer than 2 cells (or fewer than 2 markers
+with signal) cannot be drawn and are listed as skipped instead.
 
 ```{r heatmaps-before-subclustering, fig.show='hide'}
 genes_use <- rownames(spe)[!grepl("-80|PARP|IDO|IF2_GD2|IF3_CD45_CD56|DAPI|DNA|H4K12Ac|H3K9Ac|CXCR2|PNMT|Fibro|FOXP3", rownames(spe))]
 
+# Single-cell heatmap of a set of cells, saved as `filename`. Returns NA when
+# saved, otherwise why it was skipped. dittoHeatmap fails on a single cell or a
+# single marker with signal (its zero-row filter drops the matrix to a vector:
+# "argument is of length zero"), so these - and any other heatmap error - are
+# skipped instead of stopping the render. Only markers with signal in these
+# cells are passed, as dittoHeatmap would keep.
+safe_heatmap <- function(object, filename, subdir = NULL, cluster_cols = TRUE, ...) {
+  if (ncol(object) < 2) return(paste(ncol(object), "cell"))
+  expr    <- as.matrix(assay(object, "counts")[genes_use, , drop = FALSE])
+  genes_k <- genes_use[rowSums(expr != 0) > 0]
+  if (length(genes_k) < 2) return(paste(length(genes_k), "marker(s) with signal"))
+  tryCatch({
+    p1 <- dittoHeatmap(object, genes = genes_k, cluster_cols = cluster_cols,
+                       scaled.to.max = TRUE, heatmap.colors.max.scaled = viridis(100), ...)
+    save_plot(p1, filename, width = 14, height = 6, subdir = subdir)
+    NA_character_
+  }, error = function(e) conditionMessage(e))
+}
+
+# Skipped heatmaps: listed in the report and written to the job log (stderr)
+report_skipped <- function(skipped, what) {
+  if (!nrow(skipped)) return(invisible(NULL))
+  cat(sprintf("[04_phenotyping] %d %s heatmap(s) skipped: %s\n", nrow(skipped), what,
+              paste0(skipped$heatmap, " (", skipped$reason, ")", collapse = "; ")), file = stderr())
+  print(knitr::kable(skipped, row.names = FALSE, caption = paste("Skipped", what, "heatmaps")))
+}
+
 set.seed(221228)
+skipped <- data.frame(heatmap = character(0), reason = character(0))
 for (k in k_values) {
   raw_col <- paste0("pg_raw_k", k)
   for (cl in get_cluster_levels(colData(spe)[[raw_col]])) {
@@ -354,23 +386,13 @@ for (k in k_values) {
 
     rand_cells <- if (length(idx) > 8000) sample(idx, 8000) else idx
 
-    p1 <- dittoHeatmap(
-      spe[, rand_cells],
-      genes = genes_use,
-      cluster_cols = TRUE,
-      scaled.to.max = TRUE,
-      heatmap.colors.max.scaled = viridis(100)
-    )
-
-    save_plot(
-      p1,
-      paste0("heatmap_k", k, "_cluster_", cl, ".pdf"),
-      width = 14,
-      height = 6,
-      subdir = file.path("heatmap_before_subclustering", paste0("k", k))
-    )
+    fname  <- paste0("heatmap_k", k, "_cluster_", cl, ".pdf")
+    reason <- safe_heatmap(spe[, rand_cells], fname,
+                           subdir = file.path("heatmap_before_subclustering", paste0("k", k)))
+    if (!is.na(reason)) skipped[nrow(skipped) + 1, ] <- c(fname, reason)
   }
 }
+report_skipped(skipped, "per-cluster")
 ```
 
 ## Subclustering of mixed clusters using GMM
@@ -455,6 +477,7 @@ if (!length(subclusters)) message("No GMM subclustering requested (params$gmm_su
 
 ```{r subcluster-heatmaps}
 set.seed(221228)
+skipped_sub <- data.frame(heatmap = character(0), reason = character(0))
 for (sc in subclusters) {
   k_sc    <- as.integer(sc$k)
   col_sc  <- paste0("pg_clusters_k", k_sc)
@@ -477,23 +500,16 @@ for (sc in subclusters) {
   # order cells by subcluster (groups side-by-side)
   cell_order <- order(spe_cl$subcluster)
 
-  p1 <- dittoHeatmap(
-    spe_cl[, cell_order],
-    genes          = genes_use,
-    cluster_cols   = FALSE,          # keep our column order
-    scaled.to.max  = TRUE,
-    heatmap.colors.max.scaled = viridis(100),
-    annot.by       = "subcluster",
-    annot.colors   = unname(metadata(spe)$color_vectors[[paste0("col_", col_sc)]][pair_levels])
+  fname  <- paste0("heatmap_subcluster_k", k_sc, "_", orig_cl, "_", new_cl, ".pdf")
+  reason <- safe_heatmap(
+    spe_cl[, cell_order], fname,
+    cluster_cols = FALSE,          # keep our column order
+    annot.by     = "subcluster",
+    annot.colors = unname(metadata(spe)$color_vectors[[paste0("col_", col_sc)]][pair_levels])
   )
-
-  save_plot(
-    p1,
-    paste0("heatmap_subcluster_k", k_sc, "_", orig_cl, "_", new_cl, ".pdf"),
-    width  = 14,
-    height = 6
-  )
+  if (!is.na(reason)) skipped_sub[nrow(skipped_sub) + 1, ] <- c(fname, reason)
 }
+report_skipped(skipped_sub, "subcluster")
 ```
 
 For each k with GMM subclusters, the bubble plot and UMAP after subclustering:
@@ -954,6 +970,8 @@ Finally, we plot a validation heatmap of the cells in each celltype.
 # celltypes to iterate over
 clusters <- unique(colData(spe)$celltype)
 
+set.seed(221228)
+skipped_ct <- data.frame(heatmap = character(0), reason = character(0))
 for (cl in clusters) {
 
   # safe filename from celltype
@@ -962,25 +980,18 @@ for (cl in clusters) {
   safe_name <- gsub("-", "minus", safe_name)
   safe_name <- gsub("[^A-Za-z0-9_]", "_", safe_name)
 
-  spe_cl <- spe[, colData(spe)$celltype == cl]
+  idx <- which(colData(spe)$celltype == cl)
 
   # skip empty celltypes
-  if (ncol(spe_cl) == 0) next
+  if (length(idx) == 0) next
 
-  n_cells <- min(8000, ncol(spe_cl))
-  rand_cells <- sample(seq_len(ncol(spe_cl)), n_cells)
-
-  p1 <- dittoHeatmap(
-    spe_cl[, rand_cells],
-    genes = genes_use,
-    cluster_cols = TRUE,
-    scaled.to.max = TRUE,
-    heatmap.colors.max.scaled = viridis(100)
-  )
+  rand_cells <- if (length(idx) > 8000) sample(idx, 8000) else idx
 
   filename <- paste0("heatmap_celltype_", safe_name, ".pdf")
-  save_plot(p1, filename = filename, width = 14, height = 6, subdir = "heatmap_celltype")
+  reason   <- safe_heatmap(spe[, rand_cells], filename, subdir = "heatmap_celltype")
+  if (!is.na(reason)) skipped_ct[nrow(skipped_ct) + 1, ] <- c(filename, reason)
 }
+report_skipped(skipped_ct, "per-celltype")
 ```
 ## Save object
 
