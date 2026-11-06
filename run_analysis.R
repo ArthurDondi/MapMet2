@@ -46,7 +46,13 @@ reference <- Sys.getenv("MAPMET2_REFERENCE", "")                          # MapM
 lost_cell_clusters  <- NULL       # 02_QC_1: lost-cell clusters of that run's heatmap, e.g. c("26"); NULL = frozen list / IMC-DNA heuristic
 k_values            <- c(15, 30, 45, 60)  # 04_phenotyping: phenograph k values, one template tab each
 umap_max_cells      <- 20000      # 04 / 05.x: cells drawn per UMAP plot (random subset; the embedding uses all cells)
-gmm_subclusters     <- list()     # 04_phenotyping: e.g. list(list(k = 30, cluster = "5", new = "35", markers = c("CD3_")))
+# 04_phenotyping: GMM split of mixed clusters, keyed to one k's cluster IDs. Each
+# entry: k, cluster, markers (channel-name prefixes) and optionally `new`, the ID of
+# the second component (default: the next free number of that k). After adding a
+# split, 04 stops again until the new subcluster(s) are annotated.
+gmm_subclusters     <- list(
+  list(k = 15, cluster = "39", markers = c("MPO_", "CD15_", "GD2_", "CD56_"))
+)
 annotation_file     <- Sys.getenv("MAPMET2_ANNOTATION", "")               # "" = cluster_annotation_BM.xlsx in R_intermediary
 annotation_fallback <- Sys.getenv("MAPMET2_ANNOTATION_FALLBACK", "none")  # "none" (two-pass) or "transfer"
 # ----------------------------------------------------------------------------
@@ -95,8 +101,9 @@ spe04 <- file.path(output, "spe_04_phenotyping.rds")
 annotated <- file.exists(spe04) && file.mtime(spe04) >= pheno_start
 
 if (!annotated) {
-  message("\nCluster annotation pending: steps 05-06 skipped.\n",
-          "Annotate the tab of the chosen k in ",
+  message("\nCluster annotation pending: steps 05-06 skipped (the reason is printed by ",
+          "04_phenotyping above and in docs/04_phenotyping.html).\n",
+          "Annotate the tab of the chosen k (incl. any new GMM subclusters) in ",
           file.path(output, "annotation", "cluster_annotation_BM_template.xlsx"),
           ", copy its rows into the first tab, save the workbook as ",
           file.path(output, "R_intermediary", "cluster_annotation_BM.xlsx"),

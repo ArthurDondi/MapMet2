@@ -149,9 +149,13 @@ tested route.
      metacluster names where they apply; `tumor` and `other` are used by the
      correlation steps.
    * To split mixed clusters, set `gmm_subclusters` in `run_analysis.R`, giving
-     the k of the clusters (e.g. `list(list(k = 30, cluster = "5", new = "35",
-     markers = c("CD3_")))`); the subclusters appear as extra rows in that k's
-     tab after the next run.
+     the k, the cluster and the markers to split on (e.g. `list(list(k = 15,
+     cluster = "39", markers = c("MPO_", "CD15_", "GD2_", "CD56_")))`). The
+     second GMM component gets the next free cluster number of that k unless
+     you set `new`, and appears as an extra row in that k's tab after the next
+     run. That run stops again after `04` while the first tab lacks the new
+     subcluster: copy its row from the k tab into the first tab, (re)annotate it
+     and the split cluster, and run again.
    * Copy the rows of the chosen k (with the `k` and `cluster` columns) into the
      **first tab** — the only tab the script reads — and save the workbook as
      `<output>/R_intermediary/cluster_annotation_BM.xlsx`.

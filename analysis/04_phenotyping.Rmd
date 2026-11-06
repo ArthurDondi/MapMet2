@@ -24,8 +24,9 @@ params:
   # own tab in the annotation template; one k is chosen at annotation.
   k_values: !r c(15, 30, 45, 60)
   # GMM subclustering of mixed phenograph clusters, keyed to the frozen cluster
-  # IDs of one k, e.g. list(list(k = 30, cluster = "5", new = "35",
-  # markers = c("CD3_"))). Empty = no subclustering.
+  # IDs of one k, e.g. list(list(k = 30, cluster = "5", markers = c("CD3_"))).
+  # `new` (ID of the second component) is optional: default = the next free
+  # number of that k. Empty = no subclustering.
   gmm_subclusters: !r list()
   # Maximum number of reference cells per MapMetSC cell type for SingleR.
   transfer_max_per_celltype: 5000
@@ -441,55 +442,71 @@ for (k in k_values) {
 }
 
 subclusters <- params$gmm_subclusters
-for (sc in subclusters) {
-  if (is.null(sc$k) || is.null(sc$cluster) || is.null(sc$new))
-    stop("Each params$gmm_subclusters entry needs `k`, `cluster` and `new` (and optional `markers`).")
+gmm_report  <- data.frame(k = integer(0), cluster = character(0), new = character(0),
+                          markers = character(0), n_cells = integer(0), n_moved = integer(0))
+for (i in seq_along(subclusters)) {
+  sc <- subclusters[[i]]
+  if (is.null(sc$k) || is.null(sc$cluster))
+    stop("Each params$gmm_subclusters entry needs `k` and `cluster` (optional: `new`, `markers`).")
   k_sc <- as.integer(sc$k)
   if (!k_sc %in% k_values)
     stop("GMM subclustering requested for k = ", k_sc, ", which is not among params$k_values.")
   col_sc <- paste0("pg_clusters_k", k_sc)
   labs   <- colData(spe)[[col_sc]]
   cl     <- as.character(sc$cluster)
-  new_cl <- as.character(sc$new)
+  if (!cl %in% labs)
+    stop("GMM subclustering: cluster ", cl, " does not exist in the k = ", k_sc, " clustering.")
+  # ID of the second GMM component: `new` if given, else the next free number of this k
+  new_cl <- if (!is.null(sc$new)) as.character(sc$new) else
+    as.character(max(suppressWarnings(as.integer(labs)), na.rm = TRUE) + 1L)
   if (new_cl %in% labs)
     stop("GMM subcluster ID ", new_cl, " already exists among the k = ", k_sc, " clusters.")
+  subclusters[[i]]$new <- new_cl   # used by the subcluster heatmaps and the annotation check
+
+  # markers used for the split (channel-name prefixes; all clustering markers if none given)
+  used <- if (length(sc$markers)) {
+    hits <- lapply(sc$markers, function(m) grep(paste0("^", m), rownames(mat), value = TRUE))
+    if (any(lengths(hits) == 0))
+      stop("GMM marker(s) not found among the clustering channels: ",
+           paste(sc$markers[lengths(hits) == 0], collapse = ", "))
+    unique(unlist(hits))
+  } else rownames(mat)
 
   idx <- which(labs == cl)
+  n_moved <- 0L
   if (length(idx) < 4) {
     message("k = ", k_sc, ", cluster ", cl, " has < 4 cells - not subclustered.")
-    next
+  } else {
+    sub_mat <- t(mat[used, idx, drop = FALSE])  # cells x markers
+
+    # clean data
+    sub_mat <- sub_mat[complete.cases(sub_mat), , drop = FALSE]
+    sub_mat <- sub_mat[, apply(sub_mat, 2, var) > 0, drop = FALSE]
+
+    sub_mat <- scale(sub_mat)
+
+    gmm_fit <- tryCatch(
+      Mclust(sub_mat, G = 2, verbose = FALSE),
+      error = function(e) NULL
+    )
+
+    if (is.null(gmm_fit)) {
+      message("GMM failed for k = ", k_sc, ", cluster ", cl, " - not subclustered.")
+    } else {
+      comp2 <- which(gmm_fit$classification == 2)
+      labs[idx[comp2]] <- new_cl
+      colData(spe)[[col_sc]] <- labs
+      n_moved <- length(comp2)
+    }
   }
-
-  sub_mat <- t(mat[, idx])  # cells x markers
-
-  # select cluster-specific markers
-  if (length(sc$markers)) {
-    keep_cols <- grep(paste0("^(", paste(sc$markers, collapse="|"), ")"), colnames(sub_mat))
-    sub_mat <- sub_mat[, keep_cols, drop = FALSE]
-  }
-
-  # clean data
-  sub_mat <- sub_mat[complete.cases(sub_mat), , drop = FALSE]
-  sub_mat <- sub_mat[, apply(sub_mat, 2, var) > 0, drop = FALSE]
-
-  sub_mat <- scale(sub_mat)
-
-  gmm_fit <- tryCatch(
-    Mclust(sub_mat, G = 2, verbose = FALSE),
-    error = function(e) NULL
-  )
-
-  if (is.null(gmm_fit)) {
-    message("GMM failed for k = ", k_sc, ", cluster ", cl, " - not subclustered.")
-    next
-  }
-
-  comp2 <- which(gmm_fit$classification == 2)
-  labs[idx[comp2]] <- new_cl
-  colData(spe)[[col_sc]] <- labs
-  message("k = ", k_sc, ", cluster ", cl, ": ", length(comp2), " of ", length(idx),
-          " cells moved to ", new_cl)
+  gmm_report[nrow(gmm_report) + 1, ] <- list(k_sc, cl, new_cl, paste(sub("_.*$", "", used), collapse = ", "),
+                                             length(idx), n_moved)
+  cat(sprintf("[04_phenotyping] GMM split of k = %d cluster %s on %s: %d of %d cells moved to %s\n",
+              k_sc, cl, paste(sub("_.*$", "", used), collapse = "/"), n_moved, length(idx), new_cl),
+      file = stderr())
 }
+if (nrow(gmm_report)) print(knitr::kable(gmm_report, row.names = FALSE,
+                                         caption = "GMM subclustering (second component -> new)"))
 
 # Colours of the final clusters per k: a k with GMM subclusters gets a fresh
 # palette (shared by the subcluster heatmaps, bubble plot and UMAP below); the
@@ -791,7 +808,7 @@ for (nm in names(k_tabs)) {
 
 ## Annotation and merging of clusters
 
-Next, we read the filled cluster annotation: the **first tab** of the workbook (or a `.csv`) with the columns `k`, `cluster`, `celltype` and `metacluster`. Its `k` selects which clustering is annotated: all rows must share one k, and every cluster of that k must have a celltype and a metacluster. The workbook is taken from `params$annotation_file` (`MAPMET2_ANNOTATION`) or, if that is empty, from the first `cluster_annotation_BM.xlsx` / `.csv` found in `MAPMET2_INTERMEDIARY`, `<input>/R_intermediary`, `<input>/../R_intermediary` or `<output>/R_intermediary`. While there is no workbook or its first tab is empty, the step either stops here (default) or uses the transferred labels (`annotation_fallback = "transfer"`).
+Next, we read the filled cluster annotation: the **first tab** of the workbook (or a `.csv`) with the columns `k`, `cluster`, `celltype` and `metacluster`. Its `k` selects which clustering is annotated: all rows must share one k, and every cluster of that k must have a celltype and a metacluster. The workbook is taken from `params$annotation_file` (`MAPMET2_ANNOTATION`) or, if that is empty, from the first `cluster_annotation_BM.xlsx` / `.csv` found in `MAPMET2_INTERMEDIARY`, `<input>/R_intermediary`, `<input>/../R_intermediary` or `<output>/R_intermediary`. While there is no workbook or its first tab is empty, the step either stops here (default) or uses the transferred labels (`annotation_fallback = "transfer"`). It also stops here - without using the transferred labels - when the first tab does not cover every cluster of its k, e.g. after new GMM subclusters were added: copy their rows from the k tab of the regenerated template into the first tab, annotate them and run again.
 
 ```{r annotations-celltypes}
 annotation_fallback <- if (nzchar(params$annotation_fallback)) params$annotation_fallback else "none"
@@ -829,7 +846,9 @@ read_annotation <- function(f) {
 annotation <- if (!is.null(ann_file)) read_annotation(ann_file) else NULL
 if (!is.null(ann_file) && !nrow(annotation))
   message("The first tab of ", ann_file, " is empty - cluster annotation pending.")
-annotation_k <- NA_integer_
+annotation_k      <- NA_integer_
+annotation_source <- NA_character_
+annotation_gap    <- NULL   # why an existing manual annotation cannot be applied yet
 
 if (!is.null(annotation) && nrow(annotation)) {
   ks <- unique(annotation$k)
@@ -849,38 +868,58 @@ if (!is.null(annotation) && nrow(annotation)) {
   incomplete <- annotation$cluster[annotation$cluster %in% cluster_ids &
                                    (is.na(annotation$celltype) | annotation$celltype == "" |
                                     is.na(annotation$metacluster) | annotation$metacluster == "")]
-  if (length(not_annotated) || length(incomplete))
-    stop("Annotation (k = ", annotation_k, ") in ", ann_file, " is incomplete.",
-         if (length(not_annotated)) paste0(" Missing cluster(s): ", paste(not_annotated, collapse = ", "), "."),
-         if (length(incomplete)) paste0(" Empty celltype/metacluster for cluster(s): ", paste(incomplete, collapse = ", "), "."),
-         " Compare with tab k", annotation_k, " of the template ", template_file, ".")
-  extra <- setdiff(annotation$cluster, cluster_ids)
-  if (length(extra)) message("Ignoring annotation rows for clusters not in the k = ", annotation_k,
-                             " clustering: ", paste(extra, collapse = ", "))
+  if (length(not_annotated) || length(incomplete)) {
+    # e.g. new GMM subclusters: stop cleanly (as before the first annotation)
+    # so the annotation can be updated, instead of failing
+    gmm_new <- unlist(lapply(subclusters, function(sc)
+      if (as.integer(sc$k) == annotation_k) as.character(sc$new)))
+    new_missing <- intersect(not_annotated, gmm_new)
+    annotation_gap <- paste0(
+      "The annotation (k = ", annotation_k, ") in ", ann_file, " does not cover all clusters.",
+      if (length(not_annotated)) paste0(" Missing cluster(s): ", paste(not_annotated, collapse = ", "),
+                                        if (length(new_missing)) paste0(" (new GMM subcluster(s): ",
+                                                                        paste(new_missing, collapse = ", "), ")"), "."),
+      if (length(incomplete)) paste0(" Empty celltype/metacluster for cluster(s): ",
+                                     paste(incomplete, collapse = ", "), "."))
+  } else {
+    extra <- setdiff(annotation$cluster, cluster_ids)
+    if (length(extra)) message("Ignoring annotation rows for clusters not in the k = ", annotation_k,
+                               " clustering: ", paste(extra, collapse = ", "))
 
-  spe$celltype    <- unname(setNames(annotation$celltype,    annotation$cluster)[spe$pg_clusters])
-  spe$metacluster <- unname(setNames(annotation$metacluster, annotation$cluster)[spe$pg_clusters])
-  annotation_source <- paste0("manual, k = ", annotation_k, " (", ann_file, ")")
+    spe$celltype    <- unname(setNames(annotation$celltype,    annotation$cluster)[spe$pg_clusters])
+    spe$metacluster <- unname(setNames(annotation$metacluster, annotation$cluster)[spe$pg_clusters])
+    annotation_source <- paste0("manual, k = ", annotation_k, " (", ann_file, ")")
+  }
 } else if (annotation_fallback == "transfer" && transfer_ok) {
   spe$celltype    <- spe$celltype_transfer
   spe$metacluster <- spe$metacluster_transfer
   annotation_source <- "SingleR label transfer from MapMetSC"
-} else {
-  annotation_source <- NA_character_
 }
 ```
 
 ```{r annotation-pending, eval = exists("annotation_source") && is.na(annotation_source)}
-# First pass: no annotation yet. Keep the clustered object for inspection, then
-# stop rendering here (run_analysis.R skips the downstream steps).
+# No (complete) annotation yet - first pass, or new GMM subclusters to annotate.
+# Keep the clustered object for inspection, then stop rendering here
+# (run_analysis.R skips the downstream steps).
 saveRDS(spe, file.path(params$output, "spe_04_phenotyping_clusters.rds"))
-message("\n*** Cluster annotation pending ***\n",
-        "Annotate the k tabs of ", template_file, ", copy the rows of the chosen k into its\n",
-        "first tab and save the workbook as\n  ",
-        file.path(freeze_dir, "cluster_annotation_BM.xlsx"), "\n",
-        "(or set MAPMET2_ANNOTATION), then run again",
-        if (transfer_ok) "; or use the transferred labels with MAPMET2_ANNOTATION_FALLBACK=transfer" else "",
-        ".\nThe clustered (unannotated) object was saved as spe_04_phenotyping_clusters.rds.")
+pending_text <- paste0(
+  "*** Cluster annotation pending ***\n",
+  if (!is.null(annotation_gap)) {
+    paste0(annotation_gap, "\n",
+           "Copy the missing row(s) from tab k", annotation_k, " of ", template_file, "\n",
+           "into the first tab of ", ann_file, ", (re)annotate them - including any\n",
+           "cluster that was split - and run again.\n")
+  } else {
+    paste0("Annotate the k tabs of ", template_file, ", copy the rows of the chosen k into its\n",
+           "first tab and save the workbook as\n  ",
+           file.path(freeze_dir, "cluster_annotation_BM.xlsx"), "\n",
+           "(or set MAPMET2_ANNOTATION), then run again",
+           if (transfer_ok) "; or use the transferred labels with MAPMET2_ANNOTATION_FALLBACK=transfer" else "",
+           ".\n")
+  },
+  "The clustered (unannotated) object was saved as spe_04_phenotyping_clusters.rds.")
+message("\n", pending_text)
+cat(pending_text, "\n")   # also shown in the report
 knitr::knit_exit()
 ```
 
