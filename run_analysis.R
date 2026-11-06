@@ -22,10 +22,13 @@
 #     cells for every k in `k_values`, writes
 #     <output>/annotation/cluster_annotation_BM_template.xlsx (an empty first tab
 #     plus one tab per k) and stops, and the steps after it are skipped;
-#   * annotate the tab of the chosen k, copy its rows into the FIRST tab (the only
-#     one read), save the workbook as <output>/R_intermediary/cluster_annotation_BM.xlsx
-#     (or set MAPMET2_ANNOTATION) and run again: the frozen kept-cell list and
-#     phenograph clusters are reused, so the cluster IDs stay valid.
+#   * annotate the tab of the chosen k, copy its rows into the FIRST tab of that
+#     same workbook (never overwritten by later runs) and run again: the frozen
+#     kept-cell list and phenograph clusters are reused, so the cluster IDs stay
+#     valid;
+#   * with GMM subclusters (chunk gmm-subclustering of 04), 04 writes
+#     <output>/annotation/cluster_annotation_BM_template_subclustering.xlsx and
+#     stops again until its first tab, annotations_after_subclustering, is filled.
 #   Setting MAPMET2_ANNOTATION_FALLBACK=transfer instead uses the cell types
 #   transferred from MapMetSC with SingleR (needs MAPMET2_REFERENCE).
 #
@@ -46,14 +49,8 @@ reference <- Sys.getenv("MAPMET2_REFERENCE", "")                          # MapM
 lost_cell_clusters  <- NULL       # 02_QC_1: lost-cell clusters of that run's heatmap, e.g. c("26"); NULL = frozen list / IMC-DNA heuristic
 k_values            <- c(15, 30, 45, 60)  # 04_phenotyping: phenograph k values, one template tab each
 umap_max_cells      <- 20000      # 04 / 05.x: cells drawn per UMAP plot (random subset; the embedding uses all cells)
-# 04_phenotyping: GMM split of mixed clusters, keyed to one k's cluster IDs. Each
-# entry: k, cluster, markers (channel-name prefixes) and optionally `new`, the ID of
-# the second component (default: the next free number of that k). After adding a
-# split, 04 stops again until the new subcluster(s) are annotated.
-gmm_subclusters     <- list(
-  list(k = 15, cluster = "39", markers = c("MPO_", "CD15_", "GD2_", "CD56_"))
-)
-annotation_file     <- Sys.getenv("MAPMET2_ANNOTATION", "")               # "" = cluster_annotation_BM.xlsx in R_intermediary
+# (the GMM subclustering is set in analysis/04_phenotyping.Rmd, chunk gmm-subclustering)
+annotation_file     <- Sys.getenv("MAPMET2_ANNOTATION", "")               # "" = the workbook in <output>/annotation/ (see 04)
 annotation_fallback <- Sys.getenv("MAPMET2_ANNOTATION_FALLBACK", "none")  # "none" (two-pass) or "transfer"
 # ----------------------------------------------------------------------------
 
@@ -82,7 +79,6 @@ pheno_params <- c(main_params, list(reference           = reference,
                                     annotation_file     = annotation_file,
                                     annotation_fallback = annotation_fallback,
                                     k_values            = k_values,
-                                    gmm_subclusters     = gmm_subclusters,
                                     umap_max_cells      = umap_max_cells))
 corr_params  <- list(input = input, output = output, public = public, umap_max_cells = umap_max_cells)
 
@@ -103,11 +99,8 @@ annotated <- file.exists(spe04) && file.mtime(spe04) >= pheno_start
 if (!annotated) {
   message("\nCluster annotation pending: steps 05-06 skipped (the reason is printed by ",
           "04_phenotyping above and in docs/04_phenotyping.html).\n",
-          "Annotate the tab of the chosen k (incl. any new GMM subclusters) in ",
-          file.path(output, "annotation", "cluster_annotation_BM_template.xlsx"),
-          ", copy its rows into the first tab, save the workbook as ",
-          file.path(output, "R_intermediary", "cluster_annotation_BM.xlsx"),
-          " and run run_analysis.R again.")
+          "Fill in the first tab of the workbook named there (in ",
+          file.path(output, "annotation"), ") and run run_analysis.R again.")
 } else {
   # --- Validation by correlation with reference scRNA-seq datasets ----------
   render_step("analysis/05.1_correlation_Fetahu.Rmd", corr_params)   # NB bone marrow (Fetahu et al.)

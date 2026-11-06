@@ -19,9 +19,10 @@
 # the Apptainer image: read data -> QC 1 -> QC 2 -> phenotyping -> Fetahu / Lee
 # correlations -> images. Cell-type annotation is TWO-PASS (see README): the
 # first run stops after 04_phenotyping and writes an annotation template (an
-# empty first tab + one tab per phenograph k); annotate the chosen k, copy its
-# rows into the first tab, save it as $INTERMEDIARY/cluster_annotation_BM.xlsx
-# and submit again.
+# empty first tab + one tab per phenograph k) in $OUTPUT/annotation/; annotate
+# the chosen k, copy its rows into the first tab of that workbook and submit
+# again. After the GMM subclustering, fill the first tab of
+# cluster_annotation_BM_template_subclustering.xlsx and submit again.
 #
 # Submit from the MapMet2/ repo root (where run_analysis.R lives):
 #   mkdir -p logs                       # once: SLURM needs the log dir to exist
@@ -55,8 +56,8 @@ PUBLIC="${MAPMET2_PUBLIC:-$DATA/Publication/public_datasets}"
 # MapMet2's OWN output folder. Keep it separate from MapMetSC's output: both
 # pipelines write spe_0*.rds objects with the same names.
 OUTPUT="${MAPMET2_OUTPUT:-$DATA/MapMet2/output}"
-# Frozen intermediaries (kept_cells_BM.rds, pg_clusters_BM_k<k>.rds, umap_BM.rds) and the filled
-# cluster_annotation_BM.xlsx. The first run writes the frozen lists here.
+# Frozen intermediaries (kept_cells_BM.rds, pg_clusters_BM_k<k>.rds, umap_BM.rds).
+# The first run writes them here.
 INTERMEDIARY="${MAPMET2_INTERMEDIARY:-$OUTPUT/R_intermediary}"
 # Optional: MapMetSC's annotated object, used as the SingleR reference for the
 # label transfer in 04_phenotyping. Leave empty to skip the transfer.

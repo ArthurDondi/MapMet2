@@ -26,7 +26,6 @@ MapMetSC objects.
 | `pg_clusters_BM_k<k>.rds`    | `analysis/04_phenotyping.Rmd` | one per k: named vector, cell id → phenograph cluster (before GMM subclustering) |
 | `umap_BM.rds`                | `analysis/04_phenotyping.Rmd` | UMAP embedding (cell id × 2); reused while it covers all cells and was computed on the same channels and `n_neighbors` |
 | `celltype_transfer_BM.rds`   | `analysis/04_phenotyping.Rmd` | cache of the SingleR label transfer from MapMetSC (per cell) |
-| `cluster_annotation_BM.xlsx` | `analysis/04_phenotyping.Rmd` | **filled by you**, from the template in `<output>/annotation/`: only its **first tab** is read — the rows of the chosen k with `k`, `cluster`, `celltype`, `metacluster` (+ comments); a `.csv` with these columns is also accepted |
 | `celltype_order_BM.csv`      | `analysis/04_phenotyping.Rmd` | optional, `;`-separated `order;celltype`; sets the celltype display order |
 
 Cell ids are `sample_id_ObjectNumber`.
@@ -44,7 +43,7 @@ In `02_QC_1.Rmd` the lost-cell clusters set in `run_analysis.R`
 
 * Delete `kept_cells_BM.rds` to redo the lost-cell exclusion.
 * Delete `pg_clusters_BM_k*.rds` to re-cluster — the cluster IDs then change,
-  so `cluster_annotation_BM.xlsx` has to be redone too. `04` stops with a
+  so the annotation workbooks in `<output>/annotation/` have to be redone too. `04` stops with a
   message if the frozen clusters no longer cover all cells (e.g. after a QC
   change). A k added to `k_values` is clustered and frozen on the next run.
 * Delete `umap_BM.rds` to recompute the UMAP (it is recomputed automatically
