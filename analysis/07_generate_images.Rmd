@@ -37,7 +37,7 @@ params:
 
 ```{r setup, include=FALSE}
 # Output directory for plots
-plot_dir <- file.path(params$output, "plots/06_generate_images")
+plot_dir <- file.path(params$output, "plots/07_generate_images")
 if (!dir.exists(plot_dir)) {
   dir.create(plot_dir, recursive = TRUE)
 }
@@ -83,7 +83,7 @@ This standalone report renders each requested bone-marrow (BM) image — as the
 
 BM samples are cytospins, so the tumor-compartment and cellular-neighborhood
 panels of MapMetSC's `08_generate_images.Rmd` do not apply here. Plots are
-grouped per image in `plots/06_generate_images/<image_id>/`, with three
+grouped per image in `plots/07_generate_images/<image_id>/`, with three
 subfolders:
 
 * `no_mask/` — all panels above, pixel images unmasked;
@@ -97,7 +97,7 @@ The cell-level panels (cell types, metaclusters) are drawn on the segmentation
 **masks** (`plotCells`), not as points. It is meant to be rendered from
 `run_analysis.R` with a *customised* parameter list (image ids, zoom crops,
 marker list) rather than the shared `main_params` — see the
-`render_step("analysis/06_generate_images.Rmd", ...)` call there. Cell types and
+`render_step("analysis/07_generate_images.Rmd", ...)` call there. Cell types and
 colours are read from `spe_04_phenotyping.rds`, so the chosen images must be
 among the BM images processed in [chapter 04](04_phenotyping.html).
 

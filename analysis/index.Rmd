@@ -29,7 +29,11 @@ helper script `00_MapMet_color_code.R`, which every step sources.
 3. [Quality control – part 2 (segmentation artifacts)](03_QC_2.html)
 4. [Cell phenotyping](04_phenotyping.html) — clustering, label transfer from
    MapMetSC, and the two-pass cluster annotation
-5. Validation by correlation with reference scRNA-seq datasets
-    - [5.1 Fetahu et al. (neuroblastoma bone marrow)](05.1_correlation_Fetahu.html)
-    - [5.2 Lee et al. (healthy bone marrow)](05.2_correlation_Lee.html)
-6. [Region and marker images](06_generate_images.html)
+5. Bone-marrow sample analysis
+    - 5.1 Cellular communities (samples clustered on all cell types):
+      [with the normal control BM](05.1_BM_cellularcomm_with_controls.html),
+      [NB-patient samples only](05.1_BM_cellularcomm_without_controls.html)
+6. Validation by correlation with reference scRNA-seq datasets
+    - [6.1 Fetahu et al. (neuroblastoma bone marrow)](06.1_correlation_Fetahu.html)
+    - [6.2 Lee et al. (healthy bone marrow)](06.2_correlation_Lee.html)
+7. [Region and marker images](07_generate_images.html)

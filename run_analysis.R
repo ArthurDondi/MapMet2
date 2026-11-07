@@ -48,13 +48,16 @@ reference <- Sys.getenv("MAPMET2_REFERENCE", "")                          # MapM
 # Analysis settings, chosen after inspecting the first run (see README):
 lost_cell_clusters  <- NULL       # 02_QC_1: lost-cell clusters of that run's heatmap, e.g. c("26"); NULL = frozen list / IMC-DNA heuristic
 k_values            <- c(15, 30, 45, 60)  # 04_phenotyping: phenograph k values, one template tab each
-umap_max_cells      <- 20000      # 04 / 05.x: cells drawn per UMAP plot (random subset; the embedding uses all cells)
+umap_max_cells      <- 20000      # 04 / 06.x: cells drawn per UMAP plot (random subset; the embedding uses all cells)
 # (the GMM subclustering is set in analysis/04_phenotyping.Rmd, chunk gmm-subclustering)
+n_communities       <- 2          # 05.1: communities cut from the sample dendrogram (all cell types)
+min_cells_sample    <- 100        # 05.1: samples with fewer cells are left out of the community clustering
 annotation_file     <- Sys.getenv("MAPMET2_ANNOTATION", "")               # "" = the workbook in <output>/annotation/ (see 04)
 annotation_fallback <- Sys.getenv("MAPMET2_ANNOTATION_FALLBACK", "none")  # "none" (two-pass) or "transfer"
 
-# First step to render: "01" (everything), "02", "03", "04", "05" (05.1 + 05.2 + 06)
-# or "06". Earlier steps are skipped and their saved spe_*.rds objects are used,
+# First step to render: "01" (everything), "02", "03", "04", "05" (05.1 communities),
+# "06" (06.1 Fetahu + 06.2 Lee) or "07" (images); a step renders every step after it
+# too. Earlier steps are skipped and their saved spe_*.rds objects are used,
 # e.g. "04" to redo the phenotyping / annotation without re-running read + QC.
 start_from <- Sys.getenv("MAPMET2_START_FROM", "01")
 # ----------------------------------------------------------------------------
@@ -85,16 +88,18 @@ pheno_params <- c(main_params, list(reference           = reference,
                                     annotation_fallback = annotation_fallback,
                                     k_values            = k_values,
                                     umap_max_cells      = umap_max_cells))
+comm_params  <- c(main_params, list(n_communities = n_communities, min_cells = min_cells_sample))
 corr_params  <- list(input = input, output = output, public = public, umap_max_cells = umap_max_cells)
 
 # --- Where to start ----------------------------------------------------------
-steps <- c("01", "02", "03", "04", "05", "06")
+steps <- c("01", "02", "03", "04", "05", "06", "07")
 start_from <- sprintf("%02d", as.integer(sub("^0*", "", start_from)))  # "4" -> "04"
 if (!start_from %in% steps)
   stop("start_from must be one of ", paste(steps, collapse = ", "), " (got '", start_from, "').")
 # object each step reads from the step before it
 needs <- c("02" = "spe_01_read_data.rds", "03" = "spe_02_QC_1.rds", "04" = "spe_03_QC_2.rds",
-           "05" = "spe_04_phenotyping.rds", "06" = "spe_04_phenotyping.rds")
+           "05" = "spe_04_phenotyping.rds", "06" = "spe_04_phenotyping.rds",
+           "07" = "spe_04_phenotyping.rds")
 if (start_from != "01" && !file.exists(file.path(output, needs[[start_from]])))
   stop("start_from = ", start_from, " needs ", file.path(output, needs[[start_from]]),
        " from an earlier run; start from an earlier step.")
@@ -121,15 +126,29 @@ if (run_step("04")) {
 }
 
 if (!annotated) {
-  message("\nCluster annotation pending: steps 05-06 skipped (the reason is printed by ",
+  message("\nCluster annotation pending: steps 05-07 skipped (the reason is printed by ",
           "04_phenotyping above and in docs/04_phenotyping.html).\n",
           "Fill in the first tab of the workbook named there (in ",
           file.path(output, "annotation"), ") and run run_analysis.R again.")
 } else {
-  # --- Validation by correlation with reference scRNA-seq datasets ----------
+  # --- BM sample analysis: cellular communities on all cell types ----------
+  # Rendered twice: with and without the normal control BM samples. Each variant
+  # is knit from its own temporary copy of the Rmd, so the two HTML reports
+  # (05.1_BM_cellularcomm_with_controls.html / _without_controls.html) keep
+  # separate figure folders (workflowr names them after the Rmd).
   if (run_step("05")) {
-    render_step("analysis/05.1_correlation_Fetahu.Rmd", corr_params)   # NB bone marrow (Fetahu et al.)
-    render_step("analysis/05.2_correlation_Lee.Rmd",    corr_params)   # healthy bone marrow (Lee et al.)
+    for (variant in c("with_controls", "without_controls")) {
+      rmd_variant <- sprintf("analysis/05.1_BM_cellularcomm_%s.Rmd", variant)
+      file.copy("analysis/05.1_BM_cellularcomm.Rmd", rmd_variant, overwrite = TRUE)
+      tryCatch(render_step(rmd_variant, c(comm_params, list(include_controls = variant == "with_controls"))),
+               finally = unlink(rmd_variant))
+    }
+  }
+
+  # --- Validation by correlation with reference scRNA-seq datasets ----------
+  if (run_step("06")) {
+    render_step("analysis/06.1_correlation_Fetahu.Rmd", corr_params)   # NB bone marrow (Fetahu et al.)
+    render_step("analysis/06.2_correlation_Lee.Rmd",    corr_params)   # healthy bone marrow (Lee et al.)
   }
 
   # --- Region / marker images (customised params) -------------------------
@@ -150,7 +169,7 @@ if (!annotated) {
     # One zoom window c(xmin, xmax, ymin, ymax) per image id; NULL = whole image only.
     crops    = list(NULL)
   )
-  render_step("analysis/06_generate_images.Rmd", image_params)
+  render_step("analysis/07_generate_images.Rmd", image_params)
 
   message("\nAll steps completed. Rendered HTML is in docs/; objects & figures in ", output)
 }

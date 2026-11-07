@@ -28,15 +28,18 @@ analyses the diagnostic primary tumors; both build on data processed with
 | 2 | `analysis/02_QC_1.Rmd` — exclude cells lost between IF and IMC | `spe_02_QC_1.rds` |
 | 3 | `analysis/03_QC_2.Rmd` — exclude segmentation artifacts | `spe_03_QC_2.rds` |
 | 4 | `analysis/04_phenotyping.Rmd` — UMAP, phenograph clustering (k = 15 / 30 / 45 / 60), label transfer from MapMetSC, two-pass cluster annotation | `spe_04_phenotyping.rds` |
-| 5.1 | `analysis/05.1_correlation_Fetahu.Rmd` — SingleR against NB-BM scRNA-seq ([Fetahu et al.](https://doi.org/10.1038/s41467-023-39210-0)) | figures |
-| 5.2 | `analysis/05.2_correlation_Lee.Rmd` — SingleR against healthy-BM scRNA-seq ([Lee et al.](https://doi.org/10.3389/fimmu.2023.1127879)) | figures |
-| 6 | `analysis/06_generate_images.Rmd` — marker / cell-type / metacluster images of selected BM images | figures |
+| 5.1 | `analysis/05.1_BM_cellularcomm.Rmd` — cellular communities: BM samples clustered (CLR, Ward.D2) on the composition of all cell types; rendered twice, with and without the normal control BM | `communities_BM_with_controls.csv/.rds`, `communities_BM_without_controls.csv/.rds`, figures |
+| 6.1 | `analysis/06.1_correlation_Fetahu.Rmd` — SingleR against NB-BM scRNA-seq ([Fetahu et al.](https://doi.org/10.1038/s41467-023-39210-0)) | figures |
+| 6.2 | `analysis/06.2_correlation_Lee.Rmd` — SingleR against healthy-BM scRNA-seq ([Lee et al.](https://doi.org/10.3389/fimmu.2023.1127879)) | figures |
+| 7 | `analysis/07_generate_images.Rmd` — marker / cell-type / metacluster images of selected BM images | figures |
 
 Shared colors and the timepoint labels are defined once in
 `analysis/00_MapMet_color_code.R`; the bubble-plot helper is `code/bubbleplot.R`.
 Every UMAP plot shows the same random subset of at most `umap_max_cells` cells
 (default 20,000, set in `run_analysis.R`); the UMAP embedding itself is
-computed on all cells, once, and then reused from `R_intermediary/umap_BM.rds`.
+computed on all cells, once, and then reused from `R_intermediary/umap_BM.rds`. The number of communities
+(`n_communities`, default 2) and the minimum cells per sample for step 5.1
+(`min_cells_sample`, default 100) are set in `run_analysis.R` too.
 Each script reads the object written by the previous step, so the steps run in
 order. Rendered HTML goes to `docs/`, objects and figures (`plots/<step>/`) to
 the output folder.
@@ -46,8 +49,11 @@ the output folder.
 * BM samples only (`read_steinbock(pattern = "_BM_")`), all timepoints plus the
   controls; `RE1`/`RE2` are displayed as `T1`/`T2`.
 * Not carried over: the adrenal-gland (AD) reference pipeline and its
-  correlation step, the spatial analysis, the cell–cell communication analysis,
-  and the primary-tumor community / differential-abundance steps.
+  correlation step, the spatial analysis, the cell–cell communication analysis
+  and the differential-abundance step (05.2, under discussion).
+* Cellular communities (05.1) cluster the BM samples on **all** cell types
+  (MapMetSC: primary tumors on the tumor cell types), with the BM sample type
+  (control / DE / T1 / T2 / REL) as an extra metadata track.
 * QC thresholds are the BM ones of MapMetSC.
 * Frozen intermediaries (`kept_cells_BM.rds`, `pg_clusters_BM_k<k>.rds`,
   `umap_BM.rds`) are created
@@ -90,7 +96,7 @@ each Rmd's `params`):
 | `MAPMET2_INTERMEDIARY` | *(empty)* | extra folder searched first for frozen intermediaries / the filled annotation |
 | `MAPMET2_ANNOTATION` | *(empty)* | path of the filled cluster annotation (default: the workbook in `<output>/annotation/`, see below) |
 | `MAPMET2_ANNOTATION_FALLBACK` | `none` | `transfer` = use the SingleR-transferred MapMetSC labels when no filled annotation exists |
-| `MAPMET2_START_FROM` | `01` | first step to render (`01`–`06`); earlier steps are skipped and their saved `spe_*.rds` objects reused, e.g. `04` to redo only the phenotyping / annotation (`MAPMET2_START_FROM=04 sbatch run_mapmet2_slurm.sh`) |
+| `MAPMET2_START_FROM` | `01` | first step to render (`01`–`07`); earlier steps are skipped and their saved `spe_*.rds` objects reused, e.g. `04` to redo only the phenotyping / annotation (`MAPMET2_START_FROM=04 sbatch run_mapmet2_slurm.sh`) |
 
 ## Usage
 
@@ -133,7 +139,7 @@ tested route.
      `annotation` is empty; then come one tab per k (`k15`, `k30`, ...) with the
      clusters of that k: cell counts and percentages per timepoint, plus the most
      frequent transferred MapMetSC label when `MAPMET2_REFERENCE` is set;
-   * steps 5–6 are skipped.
+   * steps 5–7 are skipped.
 2. **Check and annotate.** Inspect the bubble plots and heatmaps in
    `<output>/plots/02_QC_1/` and `<output>/plots/04_phenotyping/`.
    * Which lost-cell clusters were excluded is recorded in
@@ -165,7 +171,7 @@ tested route.
    first tab is complete; fill it and run again. It is the tab used from then
    on.
 4. **Final run.** Run `run_analysis.R` again: the frozen intermediaries are
-   reused, the annotation is applied and steps 4–6 complete.
+   reused, the annotation is applied and steps 4–7 complete.
 
 To skip the manual annotation, run with `MAPMET2_ANNOTATION_FALLBACK=transfer`
 (requires `MAPMET2_REFERENCE`): the transferred MapMetSC cell types are then used.

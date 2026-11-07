@@ -17,3 +17,6 @@ logs/
 rstudio-run/
 # R default graphics device output
 Rplots.pdf
+
+# temporary per-variant copies knit by run_analysis.R (05.1)
+analysis/05.1_BM_cellularcomm_*_controls.Rmd

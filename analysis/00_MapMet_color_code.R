@@ -56,7 +56,7 @@ COL_CELLTYPE <- c(
 )
 
 # ---- Metaclusters (04_phenotyping.Rmd) -------------------------------------
-# The correlation steps (05.x) rely on the MapMetSC metacluster names "tumor"
+# The correlation steps (06.x) rely on the MapMetSC metacluster names "tumor"
 # and "other"; keep these names in the MapMet2 annotation.
 COL_METACLUSTER <- c(
   "tumor"               = "#238B45",
@@ -102,7 +102,7 @@ COL_SEX <- c(
   "m"   = rgb(  5, 113, 176, maxColorValue = 255)   # blue
 )
 
-# ---- Fetahu et al. reference: RNA cluster colors (05.1_correlation_Fetahu.Rmd)
+# ---- Fetahu et al. reference: RNA cluster colors (06.1_correlation_Fetahu.Rmd)
 COL_FETAHU_CLUSTERS <- c(
   "B (3)"       = rgb(145,   2, 144, maxColorValue = 255),
   "B (16)"      = rgb(253, 218, 236, maxColorValue = 255),
@@ -140,7 +140,7 @@ COL_FETAHU_METACLUSTER <- c(
   "SC"    = "tan2"
 )
 
-# ---- Lee et al. reference: extra label colors (05.2_correlation_Lee.Rmd) ----
+# ---- Lee et al. reference: extra label colors (06.2_correlation_Lee.Rmd) ----
 # Added on top of the per-celltype colors read from Lee/celltype_metacluster.csv.
 COL_LEE_EXTRA <- c("tumor" = "grey70", "other" = "goldenrod1")  # grey70: visible on white
 

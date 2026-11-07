@@ -16,7 +16,8 @@
 # cluster. Adapted from MapMetSC's run_mapmetsc_slurm.sh.
 #
 # The job runs the pipeline itself by executing `Rscript run_analysis.R` inside
-# the Apptainer image: read data -> QC 1 -> QC 2 -> phenotyping -> Fetahu / Lee
+# the Apptainer image: read data -> QC 1 -> QC 2 -> phenotyping -> BM cellular
+# communities -> Fetahu / Lee
 # correlations -> images. Cell-type annotation is TWO-PASS (see README): the
 # first run stops after 04_phenotyping and writes an annotation template (an
 # empty first tab + one tab per phenograph k) in $OUTPUT/annotation/; annotate
@@ -37,7 +38,7 @@
 #   MAPMET2_START_FROM=04 sbatch run_mapmet2_slurm.sh
 #
 # NOTE on parallelism / memory: 04_phenotyping uses SnowParam(workers=30) for the
-# UMAP, and the SingleR steps (label transfer in 04, 05.1 Fetahu, 05.2 Lee) use
+# UMAP, and the SingleR steps (label transfer in 04, 06.1 Fetahu, 06.2 Lee) use
 # MulticoreParam(workers=10..16). Every worker holds a copy of the data, so
 # memory is the real risk - hence the generous --mem. RNGseed is fixed in those
 # calls, so results do not depend on the worker count.
@@ -66,7 +67,7 @@ INTERMEDIARY="${MAPMET2_INTERMEDIARY:-$OUTPUT/R_intermediary}"
 # Optional: MapMetSC's annotated object, used as the SingleR reference for the
 # label transfer in 04_phenotyping. Leave empty to skip the transfer.
 REFERENCE="${MAPMET2_REFERENCE:-$DATA/Publication/output/spe_04_phenotyping.rds}"
-# First step to render (01-06; see run_analysis.R). Default: everything.
+# First step to render (01-07; see run_analysis.R). Default: everything.
 START_FROM="${MAPMET2_START_FROM:-01}"
 # ----------------------------------------------------------------------------
 

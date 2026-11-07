@@ -1,0 +1,331 @@
+---
+title: "Cellular communities in bone-marrow samples (all cell types)"
+author: "LazDaria, ArthurDondi"
+date: "`r Sys.Date()`"
+output:
+  workflowr::wflow_html
+editor_options:
+  chunk_output_type: inline
+params:
+  input: !r Sys.getenv("MAPMET2_INPUT", "/mnt/data/input_all")
+  output: !r Sys.getenv("MAPMET2_OUTPUT", "/mnt/data/output_mapmet2")
+  # TRUE: all BM samples incl. the normal control BM; FALSE: NB-patient samples only
+  include_controls: TRUE
+  # Number of communities cut from the sample dendrogram
+  n_communities: 2
+  # Samples with fewer cells are left out (their composition is too noisy)
+  min_cells: 100
+---
+
+```{r setup, include=FALSE}
+variant  <- if (isTRUE(params$include_controls)) "with_controls" else "without_controls"
+plot_dir <- file.path(params$output, "plots/05.1_BM_cellularcomm", variant)
+if (!dir.exists(plot_dir)) {
+  dir.create(plot_dir, recursive = TRUE)
+}
+
+date_prefix <- format(Sys.Date(), "%Y%m%d")
+
+# Save a plot (ggplot / patchwork / grob) as PDF or PNG, by file extension
+save_plot <- function(plot_obj, filename, width = 8, height = 6, dpi = 300) {
+  full_path <- file.path(plot_dir, paste0(date_prefix, "_", filename))
+  if (inherits(plot_obj, "ggplot")) {
+    ggsave(full_path, plot = plot_obj, width = width, height = height, dpi = dpi,
+           bg = "white", limitsize = FALSE)
+  } else {
+    if (grepl("\\.png$", full_path)) png(full_path, width = width, height = height, units = "in", res = dpi)
+    else pdf(full_path, width = width, height = height)
+    grid::grid.draw(plot_obj)
+    dev.off()
+  }
+  message("Saved: ", full_path)
+}
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  error = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  dev = "png",
+  dpi = 300,
+  fig.width = 8,
+  fig.height = 6
+)
+```
+
+# Cellular communities in bone-marrow samples {#bm-cellularcomm}
+
+Adapted from MapMetSC's `05.1_PT_DE_cellularcomm.Rmd`, which clusters diagnostic primary tumors on their tumor cell-type composition. Here we cluster **bone-marrow samples on the composition of all their cell types**. This report is the variant **`r variant`**: `r if (isTRUE(params$include_controls)) "all BM samples, including the normal control BM" else "the NB-patient BM samples only (DE, T1, T2, REL), without the normal control BM"`. The combined figure stacks the sample dendrogram, the all-cell-type composition used for the clustering, the BM sample type (timepoint) and the patient-level genetic / clinical tracks, and the tumor, immune and metacluster compositions.
+
+## Load libraries
+<details>
+   <summary>Load libraries</summary>
+
+```{r load-libraries}
+library(SingleCellExperiment)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggdendro)
+library(patchwork)
+library(gridExtra)
+```
+</details>
+
+## Read data
+We load the phenotyped single-cell data from [chapter 4](04_phenotyping.html) and keep one row per cell with its sample (`fm_id`) and the sample- and patient-level metadata.
+
+```{r read-data}
+spe <- readRDS(file.path(params$output, "spe_04_phenotyping.rds"))
+
+for (mapmet_cc_path in c("analysis/00_MapMet_color_code.R", "00_MapMet_color_code.R", "../analysis/00_MapMet_color_code.R"))
+  if (file.exists(mapmet_cc_path)) { source(mapmet_cc_path); break }
+
+col_celltype    <- metadata(spe)$color_vectors$col_celltype_ordered
+col_metacluster <- metadata(spe)$color_vectors$col_metacluster
+ct_levels       <- levels(spe$celltype_ordered)
+
+cells <- as.data.frame(colData(spe))[, c("fm_id", "patient_id", "timepoint", "celltype", "metacluster",
+                                         "MYCN_amp", "X1p_loss", "progression", "age_diag")]
+cells$celltype <- factor(cells$celltype, levels = ct_levels)
+if (!isTRUE(params$include_controls)) cells <- cells[cells$timepoint != "control", ]
+rm(spe); invisible(gc())
+
+# Samples with too few cells are left out
+n_per_sample <- table(cells$fm_id)
+too_small    <- names(n_per_sample)[n_per_sample < params$min_cells]
+if (length(too_small))
+  message(length(too_small), " sample(s) with < ", params$min_cells, " cells left out: ",
+          paste(too_small, collapse = ", "))
+cells <- cells[!cells$fm_id %in% too_small, ]
+
+# Immune compartment (as in MapMetSC: not tumor, mesenchymal or other)
+immune_meta <- setdiff(unique(cells$metacluster), c("tumor", "mesenchymal", "other"))
+```
+
+The data contain `r length(unique(cells$fm_id))` samples (`r length(too_small)` left out with fewer than `r params$min_cells` cells).
+
+## Sample-level metadata
+
+```{r sample-metadata}
+# MYCN / 1p loss / progression -> yes / no / het (NA for the controls)
+recode_ynh <- function(x) dplyr::recode(as.character(x),
+  "1" = "yes", "0" = "no", "2" = "het", "9" = "NA",
+  "MNA" = "yes", "nMNA" = "no", "het" = "het", "unknown" = "NA",
+  "Prog" = "yes", "NoProg" = "no", "yes" = "yes", "no" = "no",
+  .default = "NA", .missing = "NA")
+
+# Shannon entropy of a composition (heterogeneity)
+shannon <- function(n) { p <- n[n > 0] / sum(n); if (!length(p)) NA_real_ else -sum(p * log(p)) }
+
+samples <- cells %>%
+  group_by(fm_id) %>%
+  summarise(
+    patient_id = first(patient_id),
+    timepoint  = first(timepoint),
+    mycn       = recode_ynh(first(MYCN_amp)),
+    loss1p     = recode_ynh(first(X1p_loss)),
+    prog       = recode_ynh(first(progression)),
+    age_diag   = as.numeric(first(age_diag)),
+    n_cells    = n(),
+    pct_tumor  = 100 * mean(metacluster == "tumor"),
+    het_tumor  = shannon(table(droplevels(celltype[metacluster == "tumor"]))),
+    het_immune = shannon(table(droplevels(celltype[metacluster %in% immune_meta]))),
+    .groups = "drop"
+  ) %>%
+  as.data.frame()
+ctrl <- samples$timepoint == "control"
+samples[ctrl, c("mycn", "loss1p", "prog")] <- NA   # not applicable to the controls
+rownames(samples) <- samples$fm_id
+
+tp_levels <- intersect(TIMEPOINT_LEVELS, unique(samples$timepoint))
+samples$timepoint <- factor(samples$timepoint, levels = tp_levels)
+knitr::kable(as.data.frame(table(timepoint = samples$timepoint), responseName = "n_samples"))
+```
+
+## Cluster cellular communities
+
+We cluster the samples on their **all-cell-type** composition. Per-sample proportions are compositional, so - as in MapMetSC - we add a per-sample pseudocount (`CLR_PSEUDO` cells) and apply a centered log-ratio (CLR) transformation before clustering with Euclidean distance and Ward.D2 linkage. The dendrogram is cut into `r params$n_communities` communities, numbered by size (community 1 is the largest).
+
+```{r cluster-communities}
+set.seed(20231103)
+
+distance <- "euclidean"
+linkage  <- "ward.D2"
+CLR_PSEUDO <- 0.5
+
+counts_ct <- as.matrix(table(factor(cells$fm_id, levels = samples$fm_id), cells$celltype))
+counts_ct <- counts_ct[, colSums(counts_ct) > 0, drop = FALSE]
+prop_ct   <- counts_ct / rowSums(counts_ct)
+cmat_adj  <- sweep(prop_ct, 1, CLR_PSEUDO / rowSums(counts_ct), "+")
+clr_df    <- t(apply(cmat_adj, 1, function(x) log(x) - mean(log(x))))
+
+hc <- hclust(dist(clr_df, method = distance), method = linkage)
+
+# Reorder leaves so the larger community sorts to the left (branch swaps only)
+comm_membership   <- cutree(hc, k = params$n_communities)
+comm_sizes        <- table(comm_membership)
+comm_rank_by_size <- rank(-as.integer(comm_sizes), ties.method = "first")
+names(comm_rank_by_size) <- names(comm_sizes)
+hc <- as.hclust(reorder(as.dendrogram(hc), wts = unname(comm_rank_by_size[as.character(comm_membership)]),
+                        agglo.FUN = mean))
+
+# Community numbers by size: the largest is community 1
+samples$community <- factor(unname(comm_rank_by_size[as.character(cutree(hc, k = params$n_communities)[samples$fm_id])]))
+clustered_samples <- rownames(clr_df)[hc$order]
+community_levels  <- levels(samples$community)
+
+knitr::kable(as.data.frame.matrix(table(community = samples$community, timepoint = samples$timepoint)),
+             caption = "Samples per community and BM sample type")
+```
+
+We save each sample's community with its metadata for the downstream analyses.
+
+```{r save-communities}
+out_tab <- samples[clustered_samples, ]
+write.csv(out_tab, file.path(params$output, paste0("communities_BM_", variant, ".csv")), row.names = FALSE)
+saveRDS(out_tab, file.path(params$output, paste0("communities_BM_", variant, ".rds")))
+```
+
+## Dendrogram
+
+```{r dendrogram, fig.height=6, fig.width=10}
+p_dend_plain <- ggdendrogram(hc, labels = length(clustered_samples) <= 80) +
+  ggtitle(paste0("Samples clustered on all cell types (CLR, ", distance, ", ", linkage, ")"))
+p_dend_plain
+save_plot(p_dend_plain, "dendrogram.pdf", width = 10, height = 6)
+```
+
+## Summary statistics per community
+
+Discrete sample metadata per community (pie charts) - the BM sample type and the patient-level MYCN amplification, 1p loss and progression (not applicable to the controls):
+
+```{r piecharts, fig.height=8, fig.width=7}
+pie_vars <- list(timepoint = list(title = "BM sample", cols = COL_TIMEPOINT),
+                 mycn      = list(title = "MYCN amp.", cols = COL_YNH),
+                 loss1p    = list(title = "1p loss",   cols = COL_YNH),
+                 prog      = list(title = "progression", cols = COL_YNH))
+pie_list <- lapply(names(pie_vars), function(v) {
+  d <- samples[!is.na(samples[[v]]), ] %>% count(community, value = as.character(.data[[v]]))
+  ggplot(d, aes(x = "", y = n, fill = value)) +
+    geom_col(position = "fill") +
+    coord_polar("y", start = 0) +
+    facet_grid(. ~ community) +
+    scale_fill_manual(values = pie_vars[[v]]$cols, name = pie_vars[[v]]$title) +
+    theme_void()
+})
+p_pie <- wrap_plots(pie_list, ncol = 1)
+p_pie
+save_plot(p_pie, "piecharts_metadata.pdf", width = 7, height = 8)
+```
+
+Continuous sample metadata per community (Kruskal-Wallis p-value in each title): the tumor-cell fraction, the tumor and immune heterogeneity (Shannon entropy of the cell-type composition within the compartment) and the age at diagnosis.
+
+```{r boxplots, fig.height=4, fig.width=12}
+cont_vars <- c(pct_tumor = "% tumor cells", het_tumor = "tumor heterogeneity",
+               het_immune = "immune heterogeneity", age_diag = "age at diagnosis [months]")
+community_palette <- setNames(viridisLite::viridis(max(8, length(community_levels)))[seq_along(community_levels)],
+                              community_levels)
+box_list <- lapply(names(cont_vars), function(v) {
+  d <- samples[!is.na(samples[[v]]), ]
+  p_kw <- if (length(unique(d$community)) > 1) signif(kruskal.test(d[[v]] ~ d$community)$p.value, 2) else NA
+  ggplot(d, aes(community, .data[[v]], fill = community)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+    geom_jitter(width = 0.15, size = 0.8) +
+    scale_fill_manual(values = community_palette, guide = "none") +
+    labs(title = paste0(cont_vars[[v]], "\np = ", p_kw), x = "community", y = NULL) +
+    theme_classic() + theme(plot.title = element_text(size = 9))
+})
+p_box <- wrap_plots(box_list, nrow = 1)
+p_box
+save_plot(p_box, "boxplots_metadata.pdf", width = 12, height = 4)
+```
+
+## Combined figure (stacked panels)
+
+As in MapMetSC's Fig 3a, the panels share the dendrogram sample order, with a blank spacer column between communities: dendrogram, all-cell-type composition (the clustering input), BM sample type and genetic / clinical tracks, tumor cell types (within the tumor cells), immune cell types (within the immune cells) and metaclusters.
+
+```{r combined-figure, fig.width=14, fig.height=14}
+X_EXPAND <- expansion(add = 0.5)
+
+# ---- Spacer columns between communities ----
+comm_seq     <- as.character(samples[clustered_samples, "community"])
+N            <- length(clustered_samples)
+boundary_idx <- which(comm_seq[-1] != comm_seq[-N])
+lev_spaced   <- clustered_samples
+for (b in rev(seq_along(boundary_idx)))
+  lev_spaced <- append(lev_spaced, paste0("__gap__", b), after = boundary_idx[b])
+M        <- length(lev_spaced)
+remap_x  <- function(v) v + vapply(v, function(z) sum(boundary_idx < z), numeric(1))
+real_pos <- remap_x(seq_len(N))
+
+# ---- Dendrogram on the spaced axis, with community labels ----
+segs <- segment(dendro_data(hc, type = "rectangle"))
+segs$x <- remap_x(segs$x); segs$xend <- remap_x(segs$xend)
+h_root <- max(c(segs$y, segs$yend))
+comm_label_df <- data.frame(
+  x = vapply(community_levels, function(cc) mean(real_pos[comm_seq == cc]), numeric(1)),
+  y = h_root * 1.08, label = community_levels)
+p_dendro <- ggplot(segs) +
+  geom_segment(aes(x = x, y = y, xend = xend, yend = yend)) +
+  geom_text(data = comm_label_df, aes(x = x, y = y, label = label), fontface = "bold", size = 4) +
+  scale_x_continuous(limits = c(0.5, M + 0.5), expand = c(0, 0)) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(title = "Community") +
+  theme_void() +
+  theme(plot.title = element_text(face = "bold", size = 11, hjust = 0.5), plot.margin = margin(2, 2, 0, 2))
+
+# ---- Composition barplots (% of the cells in the panel's subset) ----
+comp_bar <- function(d, var, cols, legend_title) {
+  tab <- d %>% count(fm_id, value = .data[[var]]) %>%
+    group_by(fm_id) %>% mutate(pct = 100 * n / sum(n)) %>% ungroup() %>%
+    mutate(fm_id = factor(fm_id, levels = lev_spaced))
+  ggplot(tab, aes(fm_id, pct, fill = value)) +
+    geom_col(width = 0.9) +
+    scale_x_discrete(drop = FALSE, expand = X_EXPAND) +
+    scale_y_continuous(expand = c(0, 0)) +
+    scale_fill_manual(values = cols, name = legend_title, drop = TRUE) +
+    labs(y = "%") +
+    theme_classic() +
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), axis.title.x = element_blank(),
+          axis.line.x = element_blank(), plot.margin = margin(0, 2, 0, 2))
+}
+cells_k <- cells[cells$fm_id %in% clustered_samples, ]
+p_all    <- comp_bar(cells_k, "celltype", col_celltype, "All cell types")
+p_tumor  <- comp_bar(cells_k[cells_k$metacluster == "tumor", ], "celltype", col_celltype, "Tumor cell types")
+p_immune <- comp_bar(cells_k[cells_k$metacluster %in% immune_meta, ], "celltype", col_celltype, "Immune cell types")
+p_meta   <- comp_bar(cells_k, "metacluster", col_metacluster, "Metaclusters")
+
+# ---- Metadata strips ----
+meta_df <- samples[clustered_samples, ]
+meta_df$fm_id <- factor(meta_df$fm_id, levels = lev_spaced)
+strip <- function(var, cols, name) {
+  ggplot(meta_df, aes(fm_id, 1, fill = as.character(.data[[var]]))) +
+    geom_tile() +
+    scale_x_discrete(drop = FALSE, expand = X_EXPAND) +
+    scale_fill_manual(values = cols, name = name, na.value = "white") +
+    labs(y = name) +
+    theme_void() +
+    theme(axis.title.y = element_text(angle = 0, vjust = 0.5, hjust = 1, size = 8),
+          plot.margin = margin(0, 2, 0, 2))
+}
+p_tp   <- strip("timepoint", COL_TIMEPOINT, "BM sample")
+p_mycn <- strip("mycn",   COL_YNH, "MYCN amp.")
+p_1p   <- strip("loss1p", COL_YNH, "1p loss")
+p_prog <- strip("prog",   COL_YNH, "progression")
+
+p_combined <- (p_dendro / p_all / p_tp / p_mycn / p_1p / p_prog / p_tumor / p_immune / p_meta) +
+  plot_layout(ncol = 1, heights = c(2, 4, 0.3, 0.3, 0.3, 0.3, 3, 3, 3), guides = "collect")
+p_combined
+save_plot(p_combined, "combined_stacked.pdf", width = max(10, 4 + 0.05 * M), height = 14)
+```
+
+## Session Info
+
+<details>
+   <summary>SessionInfo</summary>
+
+```{r, echo = FALSE}
+sessionInfo()
+```
+</details>

@@ -2,7 +2,7 @@
 
 A single [Apptainer](https://apptainer.org/) (formerly Singularity) image that
 runs the **entire** MapMet2 R analysis (`analysis/01_read_data` …
-`analysis/06_generate_images`).
+`analysis/07_generate_images`).
 
 The definition ([`mapmet2.def`](mapmet2.def)) is adapted from MapMetSC's
 `apptainer/mapmetsc.def`: it is built **from scratch** on the same pinned base

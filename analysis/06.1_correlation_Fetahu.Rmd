@@ -16,7 +16,7 @@ params:
 
 ```{r setup, include=FALSE}
 # Plot output directory
-plot_dir <- file.path(params$output, "plots/05.1_correlation_Fetahu")
+plot_dir <- file.path(params$output, "plots/06.1_correlation_Fetahu")
 if (!dir.exists(plot_dir)) {
   dir.create(plot_dir, recursive = TRUE)
 }
