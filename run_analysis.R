@@ -52,6 +52,11 @@ umap_max_cells      <- 20000      # 04 / 05.x: cells drawn per UMAP plot (random
 # (the GMM subclustering is set in analysis/04_phenotyping.Rmd, chunk gmm-subclustering)
 annotation_file     <- Sys.getenv("MAPMET2_ANNOTATION", "")               # "" = the workbook in <output>/annotation/ (see 04)
 annotation_fallback <- Sys.getenv("MAPMET2_ANNOTATION_FALLBACK", "none")  # "none" (two-pass) or "transfer"
+
+# First step to render: "01" (everything), "02", "03", "04", "05" (05.1 + 05.2 + 06)
+# or "06". Earlier steps are skipped and their saved spe_*.rds objects are used,
+# e.g. "04" to redo the phenotyping / annotation without re-running read + QC.
+start_from <- Sys.getenv("MAPMET2_START_FROM", "01")
 # ----------------------------------------------------------------------------
 
 dir.create(output, showWarnings = FALSE, recursive = TRUE)
@@ -82,19 +87,38 @@ pheno_params <- c(main_params, list(reference           = reference,
                                     umap_max_cells      = umap_max_cells))
 corr_params  <- list(input = input, output = output, public = public, umap_max_cells = umap_max_cells)
 
+# --- Where to start ----------------------------------------------------------
+steps <- c("01", "02", "03", "04", "05", "06")
+start_from <- sprintf("%02d", as.integer(sub("^0*", "", start_from)))  # "4" -> "04"
+if (!start_from %in% steps)
+  stop("start_from must be one of ", paste(steps, collapse = ", "), " (got '", start_from, "').")
+# object each step reads from the step before it
+needs <- c("02" = "spe_01_read_data.rds", "03" = "spe_02_QC_1.rds", "04" = "spe_03_QC_2.rds",
+           "05" = "spe_04_phenotyping.rds", "06" = "spe_04_phenotyping.rds")
+if (start_from != "01" && !file.exists(file.path(output, needs[[start_from]])))
+  stop("start_from = ", start_from, " needs ", file.path(output, needs[[start_from]]),
+       " from an earlier run; start from an earlier step.")
+run_step <- function(step) match(step, steps) >= match(start_from, steps)
+if (start_from != "01")
+  message("Starting from step ", start_from, ": steps ",
+          paste(steps[seq_len(match(start_from, steps) - 1)], collapse = ", "), " skipped.")
+
 # --- Main single-cell pipeline ----------------------------------------------
 # Shared colors live in analysis/00_MapMet_color_code.R, which each script
 # sources automatically - it is a helper, not a rendered step.
-render_step("analysis/01_read_data.Rmd",   main_params)   # BM samples + cohort overview
-render_step("analysis/02_QC_1.Rmd",        qc1_params)    # lost cells (freezes kept_cells_BM.rds)
-render_step("analysis/03_QC_2.Rmd",        main_params)   # segmentation artifacts
+if (run_step("01")) render_step("analysis/01_read_data.Rmd",   main_params)   # BM samples + cohort overview
+if (run_step("02")) render_step("analysis/02_QC_1.Rmd",        qc1_params)    # lost cells (freezes kept_cells_BM.rds)
+if (run_step("03")) render_step("analysis/03_QC_2.Rmd",        main_params)   # segmentation artifacts
 
-pheno_start <- Sys.time()
-render_step("analysis/04_phenotyping.Rmd", pheno_params)  # clusters, label transfer, annotation
-
-# 04 writes spe_04_phenotyping.rds only once the clusters are annotated.
 spe04 <- file.path(output, "spe_04_phenotyping.rds")
-annotated <- file.exists(spe04) && file.mtime(spe04) >= pheno_start
+if (run_step("04")) {
+  pheno_start <- Sys.time()
+  render_step("analysis/04_phenotyping.Rmd", pheno_params)  # clusters, label transfer, annotation
+  # 04 writes spe_04_phenotyping.rds only once the clusters are annotated.
+  annotated <- file.exists(spe04) && file.mtime(spe04) >= pheno_start
+} else {
+  annotated <- file.exists(spe04)   # checked above
+}
 
 if (!annotated) {
   message("\nCluster annotation pending: steps 05-06 skipped (the reason is printed by ",
@@ -103,8 +127,10 @@ if (!annotated) {
           file.path(output, "annotation"), ") and run run_analysis.R again.")
 } else {
   # --- Validation by correlation with reference scRNA-seq datasets ----------
-  render_step("analysis/05.1_correlation_Fetahu.Rmd", corr_params)   # NB bone marrow (Fetahu et al.)
-  render_step("analysis/05.2_correlation_Lee.Rmd",    corr_params)   # healthy bone marrow (Lee et al.)
+  if (run_step("05")) {
+    render_step("analysis/05.1_correlation_Fetahu.Rmd", corr_params)   # NB bone marrow (Fetahu et al.)
+    render_step("analysis/05.2_correlation_Lee.Rmd",    corr_params)   # healthy bone marrow (Lee et al.)
+  }
 
   # --- Region / marker images (customised params) -------------------------
   # Standalone image step with its own params (image ids, crops, markers).

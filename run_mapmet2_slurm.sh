@@ -32,6 +32,10 @@
 #   MAPMET2_DATA=/nobackup/.../mapmet MAPMET2_SIF=/path/to/mapmet2.sif \
 #       sbatch run_mapmet2_slurm.sh
 #
+# Skip steps that are already done (their spe_*.rds objects are reused), e.g.
+# start at the phenotyping / annotation step:
+#   MAPMET2_START_FROM=04 sbatch run_mapmet2_slurm.sh
+#
 # NOTE on parallelism / memory: 04_phenotyping uses SnowParam(workers=30) for the
 # UMAP, and the SingleR steps (label transfer in 04, 05.1 Fetahu, 05.2 Lee) use
 # MulticoreParam(workers=10..16). Every worker holds a copy of the data, so
@@ -62,6 +66,8 @@ INTERMEDIARY="${MAPMET2_INTERMEDIARY:-$OUTPUT/R_intermediary}"
 # Optional: MapMetSC's annotated object, used as the SingleR reference for the
 # label transfer in 04_phenotyping. Leave empty to skip the transfer.
 REFERENCE="${MAPMET2_REFERENCE:-$DATA/Publication/output/spe_04_phenotyping.rds}"
+# First step to render (01-06; see run_analysis.R). Default: everything.
+START_FROM="${MAPMET2_START_FROM:-01}"
 # ----------------------------------------------------------------------------
 
 echo "======================"
@@ -76,6 +82,7 @@ echo "public     : $PUBLIC"
 echo "output     : $OUTPUT"
 echo "intermed.  : $INTERMEDIARY"
 echo "reference  : ${REFERENCE:-<none>}"
+echo "start from : step $START_FROM"
 echo "started    : $(date)"
 echo "======================"
 
@@ -115,6 +122,7 @@ apptainer exec \
     --env MAPMET2_OUTPUT="$OUTPUT" \
     --env MAPMET2_INTERMEDIARY="$INTERMEDIARY" \
     --env MAPMET2_REFERENCE="$REFERENCE" \
+    --env MAPMET2_START_FROM="$START_FROM" \
     "$SIF" \
     Rscript run_analysis.R
 
