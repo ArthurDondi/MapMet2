@@ -51,11 +51,11 @@ k_values            <- c(15, 30, 45, 60)  # 04_phenotyping: phenograph k values,
 umap_max_cells      <- 20000      # 04 / 06.x: cells drawn per UMAP plot (random subset; the embedding uses all cells)
 # (the GMM subclustering is set in analysis/04_phenotyping.Rmd, chunk gmm-subclustering)
 n_communities       <- 2          # 05.1: communities cut from the sample dendrogram (all cell types)
-min_cells_sample    <- 100        # 05.1: samples with fewer cells are left out of the community clustering
+min_cells_sample    <- 100        # 05.1 / 05.2: samples with fewer cells are left out (communities, DA)
 annotation_file     <- Sys.getenv("MAPMET2_ANNOTATION", "")               # "" = the workbook in <output>/annotation/ (see 04)
 annotation_fallback <- Sys.getenv("MAPMET2_ANNOTATION_FALLBACK", "none")  # "none" (two-pass) or "transfer"
 
-# First step to render: "01" (everything), "02", "03", "04", "05" (05.1 communities),
+# First step to render: "01" (everything), "02", "03", "04", "05" (05.1 communities + 05.2 DA),
 # "06" (06.1 Fetahu + 06.2 Lee) or "07" (images); a step renders every step after it
 # too. Earlier steps are skipped and their saved spe_*.rds objects are used,
 # e.g. "04" to redo the phenotyping / annotation without re-running read + QC.
@@ -89,6 +89,7 @@ pheno_params <- c(main_params, list(reference           = reference,
                                     k_values            = k_values,
                                     umap_max_cells      = umap_max_cells))
 comm_params  <- c(main_params, list(n_communities = n_communities, min_cells = min_cells_sample))
+da_params    <- c(main_params, list(min_cells = min_cells_sample))
 corr_params  <- list(input = input, output = output, public = public, umap_max_cells = umap_max_cells)
 
 # --- Where to start ----------------------------------------------------------
@@ -131,7 +132,7 @@ if (!annotated) {
           "Fill in the first tab of the workbook named there (in ",
           file.path(output, "annotation"), ") and run run_analysis.R again.")
 } else {
-  # --- BM sample analysis: cellular communities on all cell types ----------
+  # --- BM sample analysis: cellular communities (05.1) and DA (05.2) --------
   # Rendered twice: with and without the normal control BM samples. Each variant
   # is knit from its own temporary copy of the Rmd, so the two HTML reports
   # (05.1_BM_cellularcomm_with_controls.html / _without_controls.html) keep
@@ -143,6 +144,7 @@ if (!annotated) {
       tryCatch(render_step(rmd_variant, c(comm_params, list(include_controls = variant == "with_controls"))),
                finally = unlink(rmd_variant))
     }
+    render_step("analysis/05.2_BM_DA.Rmd", da_params)   # control / timepoints / MYCN comparisons
   }
 
   # --- Validation by correlation with reference scRNA-seq datasets ----------

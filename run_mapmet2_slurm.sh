@@ -17,7 +17,7 @@
 #
 # The job runs the pipeline itself by executing `Rscript run_analysis.R` inside
 # the Apptainer image: read data -> QC 1 -> QC 2 -> phenotyping -> BM cellular
-# communities -> Fetahu / Lee
+# communities -> differential abundance -> Fetahu / Lee
 # correlations -> images. Cell-type annotation is TWO-PASS (see README): the
 # first run stops after 04_phenotyping and writes an annotation template (an
 # empty first tab + one tab per phenograph k) in $OUTPUT/annotation/; annotate

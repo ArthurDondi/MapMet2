@@ -29,6 +29,7 @@ analyses the diagnostic primary tumors; both build on data processed with
 | 3 | `analysis/03_QC_2.Rmd` — exclude segmentation artifacts | `spe_03_QC_2.rds` |
 | 4 | `analysis/04_phenotyping.Rmd` — UMAP, phenograph clustering (k = 15 / 30 / 45 / 60), label transfer from MapMetSC, two-pass cluster annotation | `spe_04_phenotyping.rds` |
 | 5.1 | `analysis/05.1_BM_cellularcomm.Rmd` — cellular communities: BM samples clustered (CLR, Ward.D2) on the composition of all cell types; rendered twice, with and without the normal control BM | `communities_BM_with_controls.csv/.rds`, `communities_BM_without_controls.csv/.rds`, figures |
+| 5.2 | `analysis/05.2_BM_DA.Rmd` — differential abundance (limma-voom as diffcyt `testDA_voom`; patient as blocking factor where patients have several samples) at metacluster / all / tumor / immune cell-type level: control vs DE, T1, T2; paired DE vs T1, DE vs T2, T1 vs T2; DE vs REL; nMNA vs MNA at DE and at T2 | `DA_BM_results.csv`, figures |
 | 6.1 | `analysis/06.1_correlation_Fetahu.Rmd` — SingleR against NB-BM scRNA-seq ([Fetahu et al.](https://doi.org/10.1038/s41467-023-39210-0)) | figures |
 | 6.2 | `analysis/06.2_correlation_Lee.Rmd` — SingleR against healthy-BM scRNA-seq ([Lee et al.](https://doi.org/10.3389/fimmu.2023.1127879)) | figures |
 | 7 | `analysis/07_generate_images.Rmd` — marker / cell-type / metacluster images of selected BM images | figures |
@@ -39,7 +40,7 @@ Every UMAP plot shows the same random subset of at most `umap_max_cells` cells
 (default 20,000, set in `run_analysis.R`); the UMAP embedding itself is
 computed on all cells, once, and then reused from `R_intermediary/umap_BM.rds`. The number of communities
 (`n_communities`, default 2) and the minimum cells per sample for step 5.1
-(`min_cells_sample`, default 100) are set in `run_analysis.R` too.
+and 5.2 (`min_cells_sample`, default 100) are set in `run_analysis.R` too.
 Each script reads the object written by the previous step, so the steps run in
 order. Rendered HTML goes to `docs/`, objects and figures (`plots/<step>/`) to
 the output folder.
@@ -50,7 +51,7 @@ the output folder.
   controls; `RE1`/`RE2` are displayed as `T1`/`T2`.
 * Not carried over: the adrenal-gland (AD) reference pipeline and its
   correlation step, the spatial analysis, the cell–cell communication analysis
-  and the differential-abundance step (05.2, under discussion).
+  (05.2 DA compares BM sample groups instead of primary-tumor MNA / communities).
 * Cellular communities (05.1) cluster the BM samples on **all** cell types
   (MapMetSC: primary tumors on the tumor cell types), with the BM sample type
   (control / DE / T1 / T2 / REL) as an extra metadata track.

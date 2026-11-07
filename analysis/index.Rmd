@@ -33,6 +33,8 @@ helper script `00_MapMet_color_code.R`, which every step sources.
     - 5.1 Cellular communities (samples clustered on all cell types):
       [with the normal control BM](05.1_BM_cellularcomm_with_controls.html),
       [NB-patient samples only](05.1_BM_cellularcomm_without_controls.html)
+    - [5.2 Differential abundance](05.2_BM_DA.html) — control vs patient BM,
+      timepoints (paired by patient), relapse and MYCN status
 6. Validation by correlation with reference scRNA-seq datasets
     - [6.1 Fetahu et al. (neuroblastoma bone marrow)](06.1_correlation_Fetahu.html)
     - [6.2 Lee et al. (healthy bone marrow)](06.2_correlation_Lee.html)
