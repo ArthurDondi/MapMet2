@@ -27,7 +27,7 @@ params:
   transfer_max_per_celltype: 5000
   # Maximum number of cells drawn per UMAP plot (one fixed random subset for all
   # plots); the UMAP embedding itself is computed on all cells.
-  umap_max_cells: 20000
+  umap_max_cells: 50000
 ---
 
 ```{r setup, include=FALSE}
@@ -209,7 +209,7 @@ set.seed(221228)
 umap_cells <- sort(sample(ncol(spe), min(params$umap_max_cells, ncol(spe))))
 
 p <- dittoDimPlot(spe[, umap_cells], var = "fm_id",
-             reduction.use = "UMAP", size = 1,
+             reduction.use = "UMAP", size = 1.2,
              do.label = TRUE,
              legend.show=F) +
   theme(legend.title = element_blank()) +
@@ -229,7 +229,7 @@ The same UMAP colored by timepoint shows whether cells of the BM controls, diagn
 spe$timepoint_plot <- factor(spe$timepoint, levels = tp_levels)
 
 p_tp <- dittoDimPlot(spe[, umap_cells], var = "timepoint_plot",
-             reduction.use = "UMAP", size = 0.3,
+             reduction.use = "UMAP", size = 0.5,
              order = "randomize",
              legend.show = TRUE) +
   scale_colour_manual(values = col_timepoint) +   # matched by name
@@ -245,7 +245,7 @@ p_tp
 # UMAPs for each marker
 ```{r UMAP-all-markers, fig.width=24, fig.height=32}
 excluded_markers <- "mean-80|PARP|IDO|DAPI|IF2_GD2|IF3_CD45_CD56|DNA|H4K12Ac|H3K9Ac|CXCR2|PNMT|Fibro|FOXP3"
-max_cells_for_umap <- 20000
+max_cells_for_umap <- params$umap_max_cells
 
 marker_vars <- rownames(spe)[
   !grepl(excluded_markers, rownames(spe))
@@ -260,7 +260,7 @@ p_markers <- multi_dittoDimPlot(
   spe_umap_markers,
   vars = marker_vars,
   reduction.use = "UMAP",
-  size = 0.5,
+  size = 0.7,
   ncol = 5,
   color.panel = viridis(100, direction = -1)
 )
@@ -325,7 +325,7 @@ if (is.null(metadata(spe)$color_vectors)) {
 umap_clusters <- function(object, var, cols, title) {
   p <- dittoDimPlot(
     object, var = var, reduction.use = "UMAP",
-    size = 0.5, do.label = TRUE, legend.show = FALSE,
+    size = 0.7, do.label = TRUE, legend.show = FALSE,
     color.panel = cols
   ) +
     scale_colour_manual(values = cols) +   # matched by name: clusters absent from the subset are fine
@@ -674,7 +674,7 @@ if (!nzchar(ref_path)) {
   # Transferred cell types on the UMAP
   col_transfer <- complete_palette(spe$celltype_transfer, COL_CELLTYPE)
   p_tr <- dittoDimPlot(spe[, umap_cells], var = "celltype_transfer",
-               reduction.use = "UMAP", size = 0.3,
+               reduction.use = "UMAP", size = 0.5,
                order = "randomize",
                legend.show = TRUE) +
     scale_colour_manual(values = col_transfer) +   # matched by name
@@ -928,6 +928,17 @@ metadata(spe)$color_vectors$col_celltype <- col_celltype
 col_metacluster <- complete_palette(spe$metacluster, COL_METACLUSTER)
 metadata(spe)$color_vectors$col_metacluster <- col_metacluster
 metadata(spe)$color_vectors$col_timepoint   <- col_timepoint
+
+# Names without a MapMetSC color (they get a fallback color): rename them in the
+# annotation, or add them to COL_CELLTYPE / COL_METACLUSTER / PALETTE_ALIASES
+# in 00_MapMet_color_code.R
+unmatched <- rbind(
+  data.frame(type = "celltype",    name = attr(col_celltype, "unmatched")),
+  data.frame(type = "metacluster", name = attr(col_metacluster, "unmatched")))
+if (nrow(unmatched)) {
+  message("[04_phenotyping] no MapMetSC color for: ", paste(unmatched$name, collapse = ", "))
+  knitr::kable(unmatched, caption = "Names without a MapMetSC color (fallback color used)")
+}
 ```
 
 ## Visualizations
@@ -978,7 +989,7 @@ plot_cluster_bubble(
 ```{r umap-final-celltypes, fig.width=10}
 # aspect.ratio = 1 keeps the UMAP panel square regardless of legend width.
 p1 <- dittoDimPlot(spe[, umap_cells], var = "celltype_ordered",
-             reduction.use = "UMAP", size = 0.3,
+             reduction.use = "UMAP", size = 0.5,
              do.label = F,
              order = "randomize",
              legend.show=T) +
@@ -995,7 +1006,7 @@ We also plot the same celltype UMAP split by timepoint (control BM, DE, T1, T2, 
 
 ```{r umap-celltypes-by-timepoint, fig.width=16, fig.height=10}
 p1_tp <- dittoDimPlot(spe[, umap_cells], var = "celltype_ordered",
-             reduction.use = "UMAP", size = 0.3,
+             reduction.use = "UMAP", size = 0.5,
              split.by = "timepoint_plot",
              do.label = F,
              order = "randomize",
@@ -1011,7 +1022,7 @@ p1_tp
 
 ```{r vis-metacluster}
 p2 <- dittoDimPlot(spe[, umap_cells], var = "metacluster",
-             reduction.use = "UMAP", size = 0.3, labels.size=4,
+             reduction.use = "UMAP", size = 0.5, labels.size=4,
              do.label = F,
              order = "randomize",
              legend.show=T) +

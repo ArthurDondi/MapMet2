@@ -149,14 +149,25 @@ COL_LEE_EXTRA <- c("tumor" = "grey70", "other" = "goldenrod1")  # grey70: visibl
 # clusters where the specific hue does not carry meaning.
 COL_VECTOR_433 <- grDevices::colors()[grep("gr(a|e)y", grDevices::colors(), invert = TRUE)]
 
+# ---- MapMet2 names that take the color of a MapMetSC name -----------------
+PALETTE_ALIASES <- c(
+  "GD2low Tu" = "GD2neg Tu"
+)
+
 # ---- Helper: complete a named palette for a set of labels -------------------
-# Returns one color per unique label: labels already in `palette` keep their
-# color; the others get a deterministic pick from COL_VECTOR_433 that avoids
-# the colors already in use. Order follows `labels` (first appearance).
-complete_palette <- function(labels, palette, seed = 221228) {
+# Returns one color per unique label. A label takes the palette color of the
+# same name, matched ignoring case, spaces, hyphens / punctuation and a final
+# plural "s" (e.g. "T cell", "t-cells" -> "T cells"), or of its alias in
+# PALETTE_ALIASES. The other labels get a deterministic pick from
+# COL_VECTOR_433 that avoids the colors already in use; they are listed in
+# attr(, "unmatched"). Order follows `labels` (first appearance).
+norm_label <- function(x) sub("s$", "", gsub("[^a-z0-9+]", "", tolower(x)))
+complete_palette <- function(labels, palette, seed = 221228, aliases = PALETTE_ALIASES) {
   labels <- unique(as.character(labels[!is.na(labels)]))
-  out <- palette[intersect(names(palette), labels)]
-  missing <- setdiff(labels, names(out))
+  target <- ifelse(labels %in% names(aliases), aliases[labels], labels)
+  hit    <- match(norm_label(target), norm_label(names(palette)))
+  out    <- setNames(unname(palette[hit[!is.na(hit)]]), labels[!is.na(hit)])
+  missing <- labels[is.na(hit)]
   if (length(missing)) {
     pool <- setdiff(COL_VECTOR_433, out)
     # drop near-white / near-black colors (invisible on white, or read as text)
@@ -167,5 +178,7 @@ complete_palette <- function(labels, palette, seed = 221228) {
     extra <- sample(pool, length(missing), replace = length(missing) > length(pool))
     out <- c(out, setNames(extra, missing))
   }
-  out[labels]
+  out <- out[labels]
+  attr(out, "unmatched") <- missing
+  out
 }

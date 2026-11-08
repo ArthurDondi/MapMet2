@@ -16,6 +16,9 @@ params:
   min_cells_compartment: 10
   # FDR cutoff used to mark significant results
   fdr: 0.1
+  # 05.1 variant whose communities are compared (communities_BM_<variant>.csv);
+  # "" = no community comparison
+  community_variant: "all_without_controls"
 ---
 
 ```{r setup, include=FALSE}
@@ -48,14 +51,15 @@ knitr::opts_chunk$set(
 
 # Differential abundance in bone-marrow samples {#bm-da}
 
-Adapted from MapMetSC's `05.2_PT_DE_DA.Rmd`, which compares MNA and nMNA diagnostic primary tumors. Here we test for differential cell-type abundance between groups of **bone-marrow samples**:
+Adapted from MapMetSC's `05.2_PT_DE_DA.Rmd`, which compares MNA and nMNA diagnostic primary tumors and two cellular communities. Here we test for differential cell-type abundance between groups of **bone-marrow samples**. Comparisons are named `<A>_vs_<B>`: **logFC = log2(abundance in A / abundance in B)**, i.e. positive = more abundant in A, the first-named group.
 
-| comparison | groups | design |
-|---|---|---|
-| normal BM vs patient BM | control vs DE, control vs T1, control vs T2 | unpaired |
-| course of the disease | DE vs T1, DE vs T2, T1 vs T2 | paired: only patients sampled at both timepoints, patient as blocking factor |
-| relapse | DE vs REL | unpaired (few patients have both; those are blocked by patient) |
-| genetic subtype | nMNA vs MNA at DE, nMNA vs MNA at T2 | unpaired; MYCN-heterogeneous and unknown samples are left out |
+| comparison | design |
+|---|---|
+| `DE_vs_ctrl`, `T1_vs_ctrl`, `T2_vs_ctrl`: patient BM vs normal control BM | unpaired |
+| `T1_vs_DE`, `T2_vs_DE`, `T2_vs_T1`: course of the disease | paired: only patients sampled at both timepoints, patient as blocking factor |
+| `REL_vs_DE`: relapse | unpaired (the few patients with both samples are blocked) |
+| `MNA_vs_nMNA_DE`, `MNA_vs_nMNA_T2`: genetic subtype at DE / at T2 | unpaired; MYCN-heterogeneous and unknown samples are left out |
+| `comm<j>_vs_comm<i>`: cellular communities of 05.1 (`r if (nzchar(params$community_variant)) params$community_variant else "none"`) | unpaired; patients with samples in both communities are blocked |
 
 Each comparison is run at four levels, as in MapMetSC: metaclusters, all cell types, tumor cell types (within the tumor cells) and immune cell types (within the immune cells, i.e. all metaclusters except `tumor`, `mesenchymal` and `other`). Comparing immune cell types within the immune compartment keeps the tumor infiltration of the patient BM from lowering every immune proportion. The tumor level is skipped for the comparisons with the control BM, which has no tumor cells.
 
@@ -65,7 +69,7 @@ Each comparison is run at four levels, as in MapMetSC: metaclusters, all cell ty
 
 ```{r load-libraries}
 library(SingleCellExperiment)
-library(limma)
+library(diffcyt)
 library(dplyr)
 library(tidyr)
 library(ggplot2)
@@ -74,7 +78,7 @@ library(patchwork)
 </details>
 
 ## Read data
-We load the phenotyped single-cell data from [chapter 4](04_phenotyping.html) and keep one row per cell with its sample (`fm_id`), patient, BM sample type and MYCN status.
+We load the phenotyped single-cell data from [chapter 4](04_phenotyping.html): the expression of the clustering channels (`use_channel`, as MapMetSC's DA input) and one row per cell with its sample (`fm_id`), patient, BM sample type and MYCN status.
 
 ```{r read-data}
 spe <- readRDS(file.path(params$output, "spe_04_phenotyping.rds"))
@@ -86,11 +90,14 @@ col_celltype    <- metadata(spe)$color_vectors$col_celltype_ordered
 col_metacluster <- metadata(spe)$color_vectors$col_metacluster
 ct_levels       <- levels(spe$celltype_ordered)
 
+keep_rows <- if ("use_channel" %in% colnames(rowData(spe))) rowData(spe)$use_channel else rep(TRUE, nrow(spe))
+expr      <- as.matrix(assay(spe, "counts")[keep_rows, , drop = FALSE])   # markers x cells
+
 cells <- as.data.frame(colData(spe))[, c("fm_id", "patient_id", "timepoint", "celltype", "metacluster", "MYCN_amp")]
+cells$idx         <- seq_len(nrow(cells))                                   # column in `expr`
 cells$celltype    <- factor(as.character(cells$celltype), levels = ct_levels)
 cells$metacluster <- factor(as.character(cells$metacluster),
                             levels = intersect(names(col_metacluster), unique(as.character(cells$metacluster))))
-cells$metacluster <- addNA(cells$metacluster, ifany = TRUE)
 rm(spe); invisible(gc())
 
 # Samples with too few cells are left out
@@ -120,31 +127,48 @@ no_pid <- is.na(samples$patient_id) | samples$patient_id %in% c("", "NA")
 samples$patient_id[no_pid] <- paste0("sample_", samples$fm_id[no_pid])
 rownames(samples) <- samples$fm_id
 
+# Cellular communities from 05.1
+samples$community <- NA_character_
+comm_file <- file.path(params$output, paste0("communities_BM_", params$community_variant, ".csv"))
+if (nzchar(params$community_variant)) {
+  if (file.exists(comm_file)) {
+    comm <- read.csv(comm_file, colClasses = c(fm_id = "character"))
+    samples$community <- as.character(comm$community[match(samples$fm_id, comm$fm_id)])
+  } else message("Community file not found (", comm_file, "): community comparisons skipped. Run 05.1 first.")
+}
+
 knitr::kable(as.data.frame.matrix(table(timepoint = factor(samples$timepoint, levels = TIMEPOINT_LEVELS),
                                         MYCN = addNA(factor(samples$mna)))),
              caption = "Samples per BM sample type and MYCN status")
 
 # Immune compartment (as in 05.1: not tumor, mesenchymal or other)
-immune_meta <- setdiff(levels(droplevels(cells$metacluster)), c("tumor", "mesenchymal", "other", NA))
+immune_meta <- setdiff(levels(droplevels(cells$metacluster)), c("tumor", "mesenchymal", "other"))
 ```
 
 ## Comparisons
 
 ```{r define-comparisons}
-# g1 is the reference group: logFC = log2(g2 / g1). `paired = TRUE` keeps only
-# the patients sampled in both groups. `within` restricts the samples to one
-# BM sample type (MYCN comparisons).
+# Named <A>_vs_<B>: A = g2, B = g1 (reference), logFC = log2(A / B).
+# `paired = TRUE` keeps only the patients sampled in both groups. `within`
+# restricts the samples to one BM sample type (MYCN comparisons).
 comparisons <- list(
-  ctrl_vs_DE  = list(var = "timepoint", g1 = "control", g2 = "DE",  paired = FALSE),
-  ctrl_vs_T1  = list(var = "timepoint", g1 = "control", g2 = "T1",  paired = FALSE),
-  ctrl_vs_T2  = list(var = "timepoint", g1 = "control", g2 = "T2",  paired = FALSE),
-  DE_vs_T1    = list(var = "timepoint", g1 = "DE",      g2 = "T1",  paired = TRUE),
-  DE_vs_T2    = list(var = "timepoint", g1 = "DE",      g2 = "T2",  paired = TRUE),
-  T1_vs_T2    = list(var = "timepoint", g1 = "T1",      g2 = "T2",  paired = TRUE),
-  DE_vs_REL   = list(var = "timepoint", g1 = "DE",      g2 = "REL", paired = FALSE),
-  MNA_at_DE   = list(var = "mna", g1 = "nMNA", g2 = "MNA", paired = FALSE, within = "DE"),
-  MNA_at_T2   = list(var = "mna", g1 = "nMNA", g2 = "MNA", paired = FALSE, within = "T2")
+  DE_vs_ctrl     = list(var = "timepoint", g1 = "control", g2 = "DE",  paired = FALSE),
+  T1_vs_ctrl     = list(var = "timepoint", g1 = "control", g2 = "T1",  paired = FALSE),
+  T2_vs_ctrl     = list(var = "timepoint", g1 = "control", g2 = "T2",  paired = FALSE),
+  T1_vs_DE       = list(var = "timepoint", g1 = "DE",      g2 = "T1",  paired = TRUE),
+  T2_vs_DE       = list(var = "timepoint", g1 = "DE",      g2 = "T2",  paired = TRUE),
+  T2_vs_T1       = list(var = "timepoint", g1 = "T1",      g2 = "T2",  paired = TRUE),
+  REL_vs_DE      = list(var = "timepoint", g1 = "DE",      g2 = "REL", paired = FALSE),
+  MNA_vs_nMNA_DE = list(var = "mna", g1 = "nMNA", g2 = "MNA", paired = FALSE, within = "DE"),
+  MNA_vs_nMNA_T2 = list(var = "mna", g1 = "nMNA", g2 = "MNA", paired = FALSE, within = "T2")
 )
+# Every pair of communities (community 1 = the largest)
+comm_levels <- sort(unique(na.omit(samples$community)))
+if (length(comm_levels) >= 2) {
+  for (pr in combn(comm_levels, 2, simplify = FALSE))
+    comparisons[[paste0("comm", pr[2], "_vs_comm", pr[1])]] <-
+      list(var = "community", g1 = pr[1], g2 = pr[2], paired = FALSE)
+}
 
 # Cluster levels: metaclusters, all cell types, tumor and immune cell types
 levels_cfg <- list(
@@ -170,43 +194,23 @@ comparison_samples <- function(cmp) {
 overview <- do.call(rbind, lapply(names(comparisons), function(nm) {
   cmp <- comparisons[[nm]]; s <- comparison_samples(cmp)
   data.frame(comparison = nm, design = if (isTRUE(cmp$paired)) "paired" else "unpaired",
-             g1 = cmp$g1, n_g1 = sum(s$condition == cmp$g1),
-             g2 = cmp$g2, n_g2 = sum(s$condition == cmp$g2),
+             A = cmp$g2, n_A = sum(s$condition == cmp$g2),
+             B = cmp$g1, n_B = sum(s$condition == cmp$g1),
              patients = length(unique(s$patient_id)))
 }))
-knitr::kable(overview, caption = "Samples per comparison (after the cell-count filter)")
+knitr::kable(overview, caption = "Samples per comparison (after the cell-count filter); logFC = log2(A / B)")
 ```
 
 ## DA test
 
-As in MapMetSC, the test is diffcyt's `testDA_voom` method ([Weber et al. 2019](https://doi.org/10.1038/s42003-019-0415-5)): per-sample cluster counts, limma-voom with the library size = cells per sample (in the compartment), a linear model on the condition and, when patients contribute more than one sample (paired comparisons, DE vs REL), the patient as a blocking factor through `duplicateCorrelation` (the estimated within-patient correlation is reported in the plot titles and in the `patient_block_cor` column; when it cannot be estimated, e.g. only one patient with two samples, the model is fitted without the block). It is written here with `limma` directly on the per-sample count table, so no per-cell diffcyt object of all cells has to be built; the defaults are those of `testDA_voom` (`min_cells = 3`, `min_samples = 1`, or 20% of the samples for the tumor cell types as in MapMetSC; no TMM normalisation). P-values are adjusted per analysis (Benjamini-Hochberg). **logFC is log2(g2 / g1)**, e.g. positive in `ctrl_vs_DE` = more abundant at DE than in the control BM.
+As in MapMetSC, each analysis builds a diffcyt object from the per-sample cell tables (`prepareData`, `transformData`), sets the cluster of every cell, counts cells per cluster and sample (`calcCounts`) and tests with `testDA_voom` ([Weber et al. 2019](https://doi.org/10.1038/s42003-019-0415-5)) on the design `~ condition` with `min_cells = 3` and `min_samples = 1` (20% of the samples for the tumor cell types). In addition to MapMetSC, when patients contribute several samples (paired comparisons, and any patient present in both groups otherwise), the patient is passed as `block_id`, which `testDA_voom` handles with limma's `duplicateCorrelation`; when that correlation cannot be estimated, the test is run without the block. P-values are adjusted per analysis (Benjamini-Hochberg). Unlike MapMetSC's script, the logFC is not sign-flipped: with the condition levels (B, A) and `createContrast(c(0, 1))`, `testDA_voom` returns log2(A / B).
 
 ```{r da-function}
-# counts: clusters x samples; condition: factor (g1, g2); block: patient per sample or NULL
-da_voom <- function(counts, condition, block = NULL, min_cells = 3, min_samples = 1) {
-  keep   <- rowSums(counts >= min_cells) >= min_samples
-  res    <- data.frame(cluster_id = rownames(counts), logFC = NA_real_, AveExpr = NA_real_, t = NA_real_,
-                       p_val = NA_real_, p_adj = NA_real_, row.names = rownames(counts))
-  res$patient_block_cor <- NA_real_
-  if (sum(keep) < 2) return(res)
-  design <- model.matrix(~ condition)
-  y      <- voom(counts[keep, , drop = FALSE], design)
-  # patient block (duplicateCorrelation) when patients contribute several samples;
-  # without it when the within-patient correlation cannot be estimated
-  rho <- NA_real_
-  if (!is.null(block) && any(duplicated(block)))
-    rho <- tryCatch(duplicateCorrelation(y, design, block = block)$consensus.correlation,
-                    error = function(e) NA_real_)
-  fit <- if (is.finite(rho)) lmFit(y, design, block = block, correlation = rho) else lmFit(y, design)
-  top <- topTable(eBayes(fit), coef = 2, number = Inf, adjust.method = "BH", sort.by = "none")
-  res[rownames(top), c("logFC", "AveExpr", "t", "p_val", "p_adj")] <-
-    top[, c("logFC", "AveExpr", "t", "P.Value", "adj.P.Val")]
-  res$patient_block_cor <- rho
-  res
-}
-
 stars <- function(p) ifelse(is.na(p), "", ifelse(p < 0.001, "***", ifelse(p < 0.01, "**",
                      ifelse(p < 0.05, "*", ifelse(p < params$fdr, ".", "")))))
+
+marker_info <- data.frame(channel_name = rownames(expr), marker_name = rownames(expr),
+                          marker_class = factor("type", levels = c("type", "state", "none")))
 
 # One analysis: one comparison at one cluster level -> results + grouped boxplot
 run_da <- function(cmp_name, lvl_name) {
@@ -233,17 +237,45 @@ run_da <- function(cmp_name, lvl_name) {
   d <- d[d$fm_id %in% s$fm_id, ]
   d$cluster_id <- droplevels(d$cluster_id)
 
-  counts <- unclass(table(d$cluster_id, factor(d$fm_id, levels = s$fm_id)))
-  counts <- matrix(counts, nrow = nrow(counts), dimnames = dimnames(counts))
-  min_samples <- if (!is.null(lvl$min_samples_frac)) round(ncol(counts) * lvl$min_samples_frac) else 1
-  res <- da_voom(counts, s$condition, block = s$patient_id, min_samples = max(1, min_samples))
-  res <- cbind(comparison = cmp_name, level = lvl_name, g1 = cmp$g1, g2 = cmp$g2,
-               n_g1 = n_g[[cmp$g1]], n_g2 = n_g[[cmp$g2]],
-               design = if (isTRUE(cmp$paired)) "paired" else "unpaired", res)
+  # ---- diffcyt input, as in MapMetSC ----
+  experiment_info <- data.frame(sample_id = factor(s$fm_id, levels = s$fm_id),
+                                condition = s$condition, patient_id = factor(s$patient_id))
+  cells_by_sample <- split(d, factor(d$fm_id, levels = s$fm_id))
+  df_list <- lapply(cells_by_sample, function(x) as.data.frame(t(expr[, x$idx, drop = FALSE])))
+  d_se <- prepareData(df_list, experiment_info, marker_info)
+  rowData(d_se)$cluster_id <- factor(unlist(lapply(cells_by_sample, function(x) as.character(x$cluster_id)),
+                                            use.names = FALSE), levels = levels(d$cluster_id))
+  metadata(d_se)$cluster_codes <- data.frame(cluster_id = levels(d$cluster_id))
+  d_se     <- transformData(d_se)
+  d_counts <- calcCounts(d_se)
+  if (!is.null(colnames(d_counts)))
+    stopifnot(identical(colnames(d_counts), as.character(experiment_info$sample_id)))
+
+  design      <- createDesignMatrix(experiment_info, cols_design = "condition")
+  contrast    <- createContrast(c(0, 1))                        # log2(A / B)
+  min_samples <- if (!is.null(lvl$min_samples_frac)) max(1, round(ncol(d_counts) * lvl$min_samples_frac)) else 1
+  blocked     <- any(duplicated(experiment_info$patient_id))
+  res_DA <- NULL
+  if (blocked)
+    res_DA <- tryCatch(testDA_voom(d_counts, design, contrast, block_id = experiment_info$patient_id,
+                                   min_cells = 3, min_samples = min_samples),
+                       error = function(e) { message("Patient block not estimable for ", cmp_name, " / ",
+                                                     lvl_name, " (", conditionMessage(e), "): test without block"); NULL })
+  if (is.null(res_DA)) {
+    blocked <- FALSE
+    res_DA  <- testDA_voom(d_counts, design, contrast, min_cells = 3, min_samples = min_samples)
+  }
+  res <- data.frame(rowData(res_DA))
+  res$cluster_id <- as.character(res$cluster_id)
+  res <- cbind(comparison = cmp_name, level = lvl_name, A = cmp$g2, B = cmp$g1,
+               n_A = n_g[[cmp$g2]], n_B = n_g[[cmp$g1]],
+               design = if (isTRUE(cmp$paired)) "paired" else "unpaired", patient_block = blocked,
+               res[, intersect(c("cluster_id", "logFC", "AveExpr", "t", "p_val", "p_adj"), colnames(res))])
 
   # ---- per-sample abundances (% of the cells in the compartment) ----
-  freq <- as.data.frame(as.table(sweep(counts, 2, colSums(counts), "/") * 100),
-                        stringsAsFactors = FALSE)
+  counts <- unclass(table(d$cluster_id, factor(d$fm_id, levels = s$fm_id)))
+  counts <- matrix(counts, nrow = nrow(counts), dimnames = dimnames(counts))
+  freq <- as.data.frame(as.table(sweep(counts, 2, colSums(counts), "/") * 100), stringsAsFactors = FALSE)
   colnames(freq) <- c("cluster_id", "fm_id", "Freq")
   freq$condition <- factor(s[freq$fm_id, "condition"], levels = c(cmp$g1, cmp$g2))
   freq$patient   <- s[freq$fm_id, "patient_id"]
@@ -268,6 +300,7 @@ run_da <- function(cmp_name, lvl_name) {
   x_lims  <- c(0.5, length(cl_present) + 0.5)
   box_df  <- data.frame(x = as.vector(outer(cond_off, ct_idx, "+")),
                         cond = rep(names(cond_off), times = length(cl_present)))
+  if (cmp$var == "community") box_df$cond <- paste("comm.", box_df$cond)
 
   p_main <- ggplot(freq, aes(x = xpos, y = Freq, group = box)) +
     geom_boxplot(aes(fill = cluster_id, colour = cluster_id), position = "identity", width = 0.32,
@@ -291,11 +324,10 @@ run_da <- function(cmp_name, lvl_name) {
     scale_x_continuous(breaks = box_df$x, labels = box_df$cond, limits = x_lims, expand = c(0, 0)) +
     scale_y_continuous(expand = expansion(mult = c(0.03, 0.18))) +
     labs(x = NULL, y = "% abundance",
-         title = paste0(lvl_name, ": ", cmp$g2, " vs ", cmp$g1,
-                        if (!is.null(cmp$within)) paste0(" (", cmp$within, ")") else "",
-                        "  [", cmp$g1, " n = ", n_g[[cmp$g1]], ", ", cmp$g2, " n = ", n_g[[cmp$g2]],
+         title = paste0(lvl_name, ": ", cmp_name,
+                        "  [", cmp$g2, " n = ", n_g[[cmp$g2]], ", ", cmp$g1, " n = ", n_g[[cmp$g1]],
                         if (isTRUE(cmp$paired)) paste0("; paired, ", length(unique(s$patient_id)), " patients") else "",
-                        "; voom", if (is.finite(res$patient_block_cor[1])) paste0(" + patient block (cor = ", round(res$patient_block_cor[1], 2), ")") else "", ", BH]")) +
+                        "; testDA_voom", if (blocked) " + patient block" else "", ", BH]")) +
     theme_classic(base_size = 11) +
     theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 7),
           plot.title = element_text(size = 9), plot.margin = margin(5, 5, 2, 5))
@@ -338,13 +370,13 @@ All results are saved to `DA_BM_results.csv` in the output folder. Results with 
 
 ```{r significant}
 sig <- da_results[!is.na(da_results$p_adj) & da_results$p_adj < params$fdr,
-                  c("comparison", "level", "cluster_id", "n_g1", "n_g2", "logFC", "p_adj")]
+                  c("comparison", "level", "cluster_id", "n_A", "n_B", "logFC", "p_adj")]
 knitr::kable(sig[order(sig$comparison, sig$level, sig$p_adj), ], digits = 3, row.names = FALSE)
 ```
 
 ## Overview
 
-One panel per cluster level: every comparison (columns) for every cluster (rows), colored by logFC = log2(g2 / g1) and sized by -log10 adjusted p-value (capped at 10); black outline = adjusted p < `r params$fdr`.
+One panel per cluster level: every comparison `<A>_vs_<B>` (columns) for every cluster (rows), colored by logFC = log2(A / B) (red: more abundant in A, the first-named group; blue: more abundant in B) and sized by -log10 adjusted p-value (capped at 10); black outline = adjusted p < `r params$fdr`.
 
 ```{r overview, fig.width=10, fig.height=10}
 for (lvl_name in unique(da_results$level)) {
@@ -357,7 +389,7 @@ for (lvl_name in unique(da_results$level)) {
   p <- ggplot(d, aes(comparison, cluster_id)) +
     geom_point(aes(fill = logFC, size = pmin(-log10(p_adj), 10), colour = p_adj < params$fdr), shape = 21, stroke = 0.6) +
     scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B", limits = c(-lim, lim),
-                         name = "log2(g2 / g1)") +
+                         name = "logFC\nlog2(A / B)\nA_vs_B") +
     scale_colour_manual(values = c(`TRUE` = "black", `FALSE` = "grey80"), name = paste0("p_adj < ", params$fdr)) +
     scale_size_continuous(range = c(1, 6), limits = c(0, 10), name = "-log10(p_adj)\n(capped at 10)") +
     labs(x = NULL, y = NULL, title = lvl_name) +
@@ -365,6 +397,45 @@ for (lvl_name in unique(da_results$level)) {
   print(p)
   save_plot(p, paste0("overview_", lvl_name, ".pdf"),
             width = 3 + 0.6 * nlevels(d$comparison), height = 2 + 0.25 * nlevels(d$cluster_id))
+}
+```
+
+## Abundance per BM sample type
+
+Every cluster on its own panel, with one box per BM sample type (`r paste(intersect(TIMEPOINT_LEVELS, unique(samples$timepoint)), collapse = " / ")`): % of the cells of the level's compartment per sample (descriptive; the tests are the comparisons above).
+
+```{r abundance-by-timepoint, fig.width=14, fig.height=12}
+tp_present <- intersect(TIMEPOINT_LEVELS, unique(samples$timepoint))
+for (lvl_name in names(levels_cfg)) {
+  lvl <- levels_cfg[[lvl_name]]
+  d <- cells
+  if (!is.null(lvl$compartment)) d <- d[as.character(d$metacluster) %in% lvl$compartment, ]
+  d$cluster_id <- droplevels(d[[lvl$var]])
+  d <- d[!is.na(d$cluster_id), ]
+  n_comp <- table(d$fm_id)
+  keep   <- names(n_comp)[n_comp >= params$min_cells_compartment]
+  d <- d[d$fm_id %in% keep, ]
+  if (!nrow(d)) next
+  counts <- table(factor(d$fm_id, levels = keep), d$cluster_id)
+  freq <- as.data.frame(as.table(100 * counts / rowSums(counts)), stringsAsFactors = FALSE)
+  colnames(freq) <- c("fm_id", "cluster_id", "Freq")
+  freq$timepoint  <- factor(samples[freq$fm_id, "timepoint"], levels = tp_present)
+  freq$cluster_id <- factor(freq$cluster_id, levels = levels(d$cluster_id))
+  n_s <- table(samples[keep, "timepoint"])
+  p <- ggplot(freq, aes(timepoint, Freq, fill = timepoint)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+    geom_jitter(width = 0.15, height = 0, size = 0.5, alpha = 0.6) +
+    facet_wrap(~ cluster_id, scales = "free_y") +
+    scale_fill_manual(values = COL_TIMEPOINT, guide = "none") +
+    scale_x_discrete(labels = function(x) paste0(x, "\n(n=", as.integer(n_s[x]), ")"), drop = FALSE) +
+    labs(x = NULL, y = "% abundance",
+         title = paste0(lvl_name, if (!is.null(lvl$compartment)) " (within the compartment)" else "")) +
+    theme_bw(base_size = 9) +
+    theme(strip.text = element_text(size = 7))
+  print(p)
+  n_cl  <- nlevels(freq$cluster_id); n_col <- ceiling(sqrt(n_cl))
+  save_plot(p, paste0("abundance_by_timepoint_", lvl_name, ".pdf"),
+            width = 2.2 * n_col + 1, height = 2 * ceiling(n_cl / n_col) + 1)
 }
 ```
 

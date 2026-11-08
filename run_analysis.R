@@ -48,9 +48,16 @@ reference <- Sys.getenv("MAPMET2_REFERENCE", "")                          # MapM
 # Analysis settings, chosen after inspecting the first run (see README):
 lost_cell_clusters  <- NULL       # 02_QC_1: lost-cell clusters of that run's heatmap, e.g. c("26"); NULL = frozen list / IMC-DNA heuristic
 k_values            <- c(15, 30, 45, 60)  # 04_phenotyping: phenograph k values, one template tab each
-umap_max_cells      <- 20000      # 04 / 06.x: cells drawn per UMAP plot (random subset; the embedding uses all cells)
+umap_max_cells      <- 50000      # 04 / 06.x: cells drawn per UMAP plot (random subset; the embedding uses all cells)
 # (the GMM subclustering is set in analysis/04_phenotyping.Rmd, chunk gmm-subclustering)
-n_communities       <- 2          # 05.1: communities cut from the sample dendrogram (all cell types)
+# 05.1: communities cut from each sample dendrogram, per variant
+# (<clustered on>_<with|without>_controls); a number, or "auto" = the largest k
+# whose communities are all bootstrap-stable (see 05.1, "Number of communities")
+n_communities <- c(all_with_controls       = 3,
+                   all_without_controls    = 3,
+                   immune_with_controls    = 3,
+                   immune_without_controls = 3)
+community_variant   <- "all_without_controls"  # 05.2: 05.1 variant whose communities are compared ("" = none)
 min_cells_sample    <- 100        # 05.1 / 05.2: samples with fewer cells are left out (communities, DA)
 annotation_file     <- Sys.getenv("MAPMET2_ANNOTATION", "")               # "" = the workbook in <output>/annotation/ (see 04)
 annotation_fallback <- Sys.getenv("MAPMET2_ANNOTATION_FALLBACK", "none")  # "none" (two-pass) or "transfer"
@@ -88,8 +95,8 @@ pheno_params <- c(main_params, list(reference           = reference,
                                     annotation_fallback = annotation_fallback,
                                     k_values            = k_values,
                                     umap_max_cells      = umap_max_cells))
-comm_params  <- c(main_params, list(n_communities = n_communities, min_cells = min_cells_sample))
-da_params    <- c(main_params, list(min_cells = min_cells_sample))
+comm_params  <- c(main_params, list(min_cells = min_cells_sample))
+da_params    <- c(main_params, list(min_cells = min_cells_sample, community_variant = community_variant))
 corr_params  <- list(input = input, output = output, public = public, umap_max_cells = umap_max_cells)
 
 # --- Where to start ----------------------------------------------------------
@@ -133,15 +140,19 @@ if (!annotated) {
           file.path(output, "annotation"), ") and run run_analysis.R again.")
 } else {
   # --- BM sample analysis: cellular communities (05.1) and DA (05.2) --------
-  # Rendered twice: with and without the normal control BM samples. Each variant
-  # is knit from its own temporary copy of the Rmd, so the two HTML reports
-  # (05.1_BM_cellularcomm_with_controls.html / _without_controls.html) keep
-  # separate figure folders (workflowr names them after the Rmd).
+  # 05.1 is rendered four times: samples clustered on all / on immune cell
+  # types, each with and without the normal control BM. Each variant is knit
+  # from its own temporary copy of the Rmd, so the HTML reports
+  # (05.1_BM_cellularcomm_<variant>.html) keep separate figure folders
+  # (workflowr names them after the Rmd).
   if (run_step("05")) {
-    for (variant in c("with_controls", "without_controls")) {
+    for (variant in names(n_communities)) {
       rmd_variant <- sprintf("analysis/05.1_BM_cellularcomm_%s.Rmd", variant)
       file.copy("analysis/05.1_BM_cellularcomm.Rmd", rmd_variant, overwrite = TRUE)
-      tryCatch(render_step(rmd_variant, c(comm_params, list(include_controls = variant == "with_controls"))),
+      tryCatch(render_step(rmd_variant, c(comm_params, list(
+                 cluster_on       = sub("_.*$", "", variant),
+                 include_controls = grepl("_with_controls$", variant),
+                 n_communities    = n_communities[[variant]]))),
                finally = unlink(rmd_variant))
     }
     render_step("analysis/05.2_BM_DA.Rmd", da_params)   # control / timepoints / MYCN comparisons

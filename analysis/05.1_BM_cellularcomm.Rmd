@@ -1,5 +1,5 @@
 ---
-title: "Cellular communities in bone-marrow samples (all cell types)"
+title: "Cellular communities in bone-marrow samples"
 author: "LazDaria, ArthurDondi"
 date: "`r Sys.Date()`"
 output:
@@ -11,14 +11,24 @@ params:
   output: !r Sys.getenv("MAPMET2_OUTPUT", "/mnt/data/output_mapmet2")
   # TRUE: all BM samples incl. the normal control BM; FALSE: NB-patient samples only
   include_controls: TRUE
-  # Number of communities cut from the sample dendrogram
-  n_communities: 2
+  # Composition the samples are clustered on: "all" (all cell types) or
+  # "immune" (immune cell types, within the immune cells)
+  cluster_on: "all"
+  # Number of communities cut from the sample dendrogram, or "auto" (the largest
+  # k whose communities are all bootstrap-stable, see "Number of communities")
+  n_communities: 3
+  # k values compared in "Number of communities": 2..k_max
+  k_max: 8
+  # Bootstrap resamples for the cluster stability (Jaccard)
+  n_boot: 100
   # Samples with fewer cells are left out (their composition is too noisy)
   min_cells: 100
+  # ... and, for cluster_on = "immune", samples with fewer immune cells
+  min_cells_compartment: 10
 ---
 
 ```{r setup, include=FALSE}
-variant  <- if (isTRUE(params$include_controls)) "with_controls" else "without_controls"
+variant  <- paste0(params$cluster_on, "_", if (isTRUE(params$include_controls)) "with_controls" else "without_controls")
 plot_dir <- file.path(params$output, "plots/05.1_BM_cellularcomm", variant)
 if (!dir.exists(plot_dir)) {
   dir.create(plot_dir, recursive = TRUE)
@@ -55,7 +65,9 @@ knitr::opts_chunk$set(
 
 # Cellular communities in bone-marrow samples {#bm-cellularcomm}
 
-Adapted from MapMetSC's `05.1_PT_DE_cellularcomm.Rmd`, which clusters diagnostic primary tumors on their tumor cell-type composition. Here we cluster **bone-marrow samples on the composition of all their cell types**. This report is the variant **`r variant`**: `r if (isTRUE(params$include_controls)) "all BM samples, including the normal control BM" else "the NB-patient BM samples only (DE, T1, T2, REL), without the normal control BM"`. The combined figure stacks the sample dendrogram, the all-cell-type composition used for the clustering, the BM sample type (timepoint) and the patient-level genetic / clinical tracks, and the tumor, immune and metacluster compositions.
+Adapted from MapMetSC's `05.1_PT_DE_cellularcomm.Rmd`, which clusters diagnostic primary tumors on their tumor cell-type composition. Here we cluster **bone-marrow samples** on the composition of `r if (params$cluster_on == "immune") "their **immune cell types** (within the immune cells)" else "**all their cell types**"`. This report is the variant **`r variant`**: `r if (isTRUE(params$include_controls)) "all BM samples, including the normal control BM" else "the NB-patient BM samples only (DE, T1, T2, REL), without the normal control BM"`.
+
+The combined figures stack the sample dendrogram, the composition used for the clustering, the BM sample type (timepoint), the community and the patient-level genetic / clinical tracks, and the tumor, immune and metacluster compositions; a second version groups the samples by BM sample type and orders them by clustering within each group.
 
 ## Load libraries
 <details>
@@ -68,7 +80,7 @@ library(tidyr)
 library(ggplot2)
 library(ggdendro)
 library(patchwork)
-library(gridExtra)
+library(cluster)
 ```
 </details>
 
@@ -87,23 +99,26 @@ ct_levels       <- levels(spe$celltype_ordered)
 
 cells <- as.data.frame(colData(spe))[, c("fm_id", "patient_id", "timepoint", "celltype", "metacluster",
                                          "MYCN_amp", "X1p_loss", "progression", "age_diag")]
-cells$celltype <- factor(cells$celltype, levels = ct_levels)
+cells$celltype <- factor(as.character(cells$celltype), levels = ct_levels)
 if (!isTRUE(params$include_controls)) cells <- cells[cells$timepoint != "control", ]
 rm(spe); invisible(gc())
 
-# Samples with too few cells are left out
+# Immune compartment (as in MapMetSC: not tumor, mesenchymal or other)
+immune_meta <- setdiff(unique(as.character(cells$metacluster)), c("tumor", "mesenchymal", "other", NA))
+
+# Samples with too few cells (or immune cells, when clustering on them) are left out
 n_per_sample <- table(cells$fm_id)
 too_small    <- names(n_per_sample)[n_per_sample < params$min_cells]
+if (params$cluster_on == "immune") {
+  n_imm <- table(factor(cells$fm_id[cells$metacluster %in% immune_meta], levels = names(n_per_sample)))
+  too_small <- union(too_small, names(n_imm)[n_imm < params$min_cells_compartment])
+}
 if (length(too_small))
-  message(length(too_small), " sample(s) with < ", params$min_cells, " cells left out: ",
-          paste(too_small, collapse = ", "))
+  message(length(too_small), " sample(s) left out (too few cells): ", paste(too_small, collapse = ", "))
 cells <- cells[!cells$fm_id %in% too_small, ]
-
-# Immune compartment (as in MapMetSC: not tumor, mesenchymal or other)
-immune_meta <- setdiff(unique(cells$metacluster), c("tumor", "mesenchymal", "other"))
 ```
 
-The data contain `r length(unique(cells$fm_id))` samples (`r length(too_small)` left out with fewer than `r params$min_cells` cells).
+The data contain `r length(unique(cells$fm_id))` samples (`r length(too_small)` left out with too few cells).
 
 ## Sample-level metadata
 
@@ -143,27 +158,112 @@ samples$timepoint <- factor(samples$timepoint, levels = tp_levels)
 knitr::kable(as.data.frame(table(timepoint = samples$timepoint), responseName = "n_samples"))
 ```
 
-## Cluster cellular communities
+## Clustering input
 
-We cluster the samples on their **all-cell-type** composition. Per-sample proportions are compositional, so - as in MapMetSC - we add a per-sample pseudocount (`CLR_PSEUDO` cells) and apply a centered log-ratio (CLR) transformation before clustering with Euclidean distance and Ward.D2 linkage. The dendrogram is cut into `r params$n_communities` communities, numbered by size (community 1 is the largest).
+As in MapMetSC, per-sample proportions are compositional, so we add a per-sample pseudocount (`CLR_PSEUDO` cells / cells of the sample) and apply a centered log-ratio (CLR) transformation; the samples are then clustered hierarchically with **Euclidean distance and Ward.D2 linkage** (`hclust(method = "ward.D2")`).
 
-```{r cluster-communities}
+```{r clr}
 set.seed(20231103)
 
-distance <- "euclidean"
-linkage  <- "ward.D2"
+distance   <- "euclidean"
+linkage    <- "ward.D2"
 CLR_PSEUDO <- 0.5
 
-counts_ct <- as.matrix(table(factor(cells$fm_id, levels = samples$fm_id), cells$celltype))
+clust_cells <- if (params$cluster_on == "immune") cells[cells$metacluster %in% immune_meta, ] else cells
+counts_ct <- as.matrix(table(factor(clust_cells$fm_id, levels = samples$fm_id), droplevels(clust_cells$celltype)))
 counts_ct <- counts_ct[, colSums(counts_ct) > 0, drop = FALSE]
 prop_ct   <- counts_ct / rowSums(counts_ct)
 cmat_adj  <- sweep(prop_ct, 1, CLR_PSEUDO / rowSums(counts_ct), "+")
 clr_df    <- t(apply(cmat_adj, 1, function(x) log(x) - mean(log(x))))
 
-hc <- hclust(dist(clr_df, method = distance), method = linkage)
+dist_matrix <- dist(clr_df, method = distance)
+hc <- hclust(dist_matrix, method = linkage)
+```
 
+## Number of communities
+
+Three criteria for the number of communities k, all computed on the same CLR distance and Ward.D2 tree:
+
+* **average silhouette width** ([Rousseeuw 1987](https://doi.org/10.1016/0377-0427(87)90125-7)): how much closer samples are to their own community than to the nearest other one (higher is better);
+* **gap statistic** ([Tibshirani et al. 2001](https://doi.org/10.1111/1467-9868.00293)): within-community dispersion compared with uniform reference data; the k chosen with the "first SE max" rule;
+* **bootstrap stability** ([Hennig 2007](https://doi.org/10.1016/j.csda.2006.11.025)): the samples are resampled `r params$n_boot` times and re-clustered; for each community, the mean Jaccard similarity with its best-matching bootstrap community. Hennig's guide: < 0.6 the community dissolves, ≥ 0.75 it is stable. The plot shows the least stable community of each k.
+
+`n_communities = "auto"` takes the largest k whose least stable community still has a mean bootstrap Jaccard ≥ 0.75 (every community stable), and the gap-statistic k if no k passes; otherwise `n_communities` is used as set (`r params$n_communities` here). The average silhouette width tends to favour k = 2 when one group of samples is very distinct, so it is reported but not used for the choice.
+
+```{r choose-k, fig.width=12, fig.height=4}
+k_range  <- 2:max(2, min(params$k_max, nrow(clr_df) - 1))
+hc_cut   <- function(x, k) list(cluster = cutree(hclust(dist(x, method = distance), method = linkage), k))
+
+sil_width <- vapply(k_range, function(k)
+  mean(silhouette(cutree(hc, k), dist_matrix)[, "sil_width"]), numeric(1))
+
+set.seed(20231103)
+gap    <- clusGap(clr_df, FUNcluster = hc_cut, K.max = max(k_range), B = params$n_boot, verbose = FALSE)
+gap_k  <- maxSE(gap$Tab[, "gap"], gap$Tab[, "SE.sim"], method = "firstSEmax")
+
+# Bootstrap stability (clusterwise Jaccard, as fpc::clusterboot)
+set.seed(20231103)
+n_s  <- nrow(clr_df)
+jacc <- lapply(k_range, function(k) matrix(NA_real_, params$n_boot, k))
+for (b in seq_len(params$n_boot)) {
+  idx  <- sample(n_s, n_s, replace = TRUE)
+  hc_b <- hclust(dist(clr_df[idx, , drop = FALSE], method = distance), method = linkage)
+  u    <- !duplicated(idx)
+  for (i in seq_along(k_range)) {
+    k    <- k_range[i]
+    cl_b <- cutree(hc_b, k)[u]
+    cl_o <- cutree(hc, k)[idx[u]]
+    for (c0 in seq_len(k)) {
+      in0 <- cl_o == c0
+      if (!any(in0)) next
+      jacc[[i]][b, c0] <- max(vapply(unique(cl_b), function(c1) {
+        in1 <- cl_b == c1; sum(in0 & in1) / sum(in0 | in1) }, numeric(1)))
+    }
+  }
+}
+```
+
+```{r choose-k-table, fig.width=12, fig.height=4}
+stab_min  <- vapply(jacc, function(m) min(colMeans(m, na.rm = TRUE), na.rm = TRUE), numeric(1))
+stab_mean <- vapply(jacc, function(m) mean(colMeans(m, na.rm = TRUE), na.rm = TRUE), numeric(1))
+k_diag <- data.frame(k = k_range, silhouette = sil_width, gap = gap$Tab[k_range, "gap"],
+                     gap_SE = gap$Tab[k_range, "SE.sim"],
+                     jaccard_min = stab_min, jaccard_mean = stab_mean)
+sil_k  <- k_range[which.max(sil_width)]
+stab_k <- if (any(stab_min >= 0.75)) max(k_range[stab_min >= 0.75]) else gap_k
+knitr::kable(k_diag, digits = 3,
+             caption = paste0("Best k: bootstrap stability (largest k with all Jaccard >= 0.75) = ", stab_k,
+                              ", gap statistic (firstSEmax) = ", gap_k, ", silhouette = ", sil_k))
+write.csv(k_diag, file.path(plot_dir, paste0(date_prefix, "_n_communities_criteria.csv")), row.names = FALSE)
+
+n_comm <- if (identical(as.character(params$n_communities), "auto")) stab_k else as.integer(params$n_communities)
+message("[05.1 ", variant, "] k: stability = ", stab_k, ", gap = ", gap_k, ", silhouette = ", sil_k, "; using ", n_comm)
+
+k_long <- rbind(
+  data.frame(k = k_range, value = sil_width, criterion = "average silhouette width"),
+  data.frame(k = k_range, value = k_diag$gap, criterion = "gap statistic"),
+  data.frame(k = k_range, value = stab_min, criterion = "bootstrap Jaccard (least stable community)"))
+k_long$criterion <- factor(k_long$criterion, levels = unique(k_long$criterion))
+p_k <- ggplot(k_long, aes(k, value)) +
+  geom_line() + geom_point() +
+  geom_vline(xintercept = n_comm, linetype = "dashed", colour = "red") +
+  geom_hline(data = data.frame(criterion = factor("bootstrap Jaccard (least stable community)", levels = levels(k_long$criterion)),
+                               y = c(0.6, 0.75)), aes(yintercept = y), linetype = "dotted", colour = "grey50") +
+  facet_wrap(~ criterion, scales = "free_y") +
+  scale_x_continuous(breaks = k_range) +
+  labs(y = NULL, subtitle = paste0("dashed: k used (", n_comm, ")")) +
+  theme_bw()
+p_k
+save_plot(p_k, "n_communities_criteria.pdf", width = 12, height = 4)
+```
+
+## Cluster cellular communities
+
+The dendrogram is cut into `r n_comm` communities, numbered by size (community 1 is the largest).
+
+```{r cluster-communities}
 # Reorder leaves so the larger community sorts to the left (branch swaps only)
-comm_membership   <- cutree(hc, k = params$n_communities)
+comm_membership   <- cutree(hc, k = n_comm)
 comm_sizes        <- table(comm_membership)
 comm_rank_by_size <- rank(-as.integer(comm_sizes), ties.method = "first")
 names(comm_rank_by_size) <- names(comm_sizes)
@@ -171,18 +271,21 @@ hc <- as.hclust(reorder(as.dendrogram(hc), wts = unname(comm_rank_by_size[as.cha
                         agglo.FUN = mean))
 
 # Community numbers by size: the largest is community 1
-samples$community <- factor(unname(comm_rank_by_size[as.character(cutree(hc, k = params$n_communities)[samples$fm_id])]))
+samples$community <- factor(unname(comm_rank_by_size[as.character(cutree(hc, k = n_comm)[samples$fm_id])]))
 clustered_samples <- rownames(clr_df)[hc$order]
 community_levels  <- levels(samples$community)
+community_palette <- setNames(viridisLite::viridis(max(8, length(community_levels)))[seq_along(community_levels)],
+                              community_levels)
 
 knitr::kable(as.data.frame.matrix(table(community = samples$community, timepoint = samples$timepoint)),
              caption = "Samples per community and BM sample type")
 ```
 
-We save each sample's community with its metadata for the downstream analyses.
+We save each sample's community with its metadata for the downstream analyses (05.2).
 
 ```{r save-communities}
 out_tab <- samples[clustered_samples, ]
+out_tab$cluster_on <- params$cluster_on
 write.csv(out_tab, file.path(params$output, paste0("communities_BM_", variant, ".csv")), row.names = FALSE)
 saveRDS(out_tab, file.path(params$output, paste0("communities_BM_", variant, ".rds")))
 ```
@@ -191,7 +294,7 @@ saveRDS(out_tab, file.path(params$output, paste0("communities_BM_", variant, ".r
 
 ```{r dendrogram, fig.height=6, fig.width=10}
 p_dend_plain <- ggdendrogram(hc, labels = length(clustered_samples) <= 80) +
-  ggtitle(paste0("Samples clustered on all cell types (CLR, ", distance, ", ", linkage, ")"))
+  ggtitle(paste0("Samples clustered on ", params$cluster_on, " cell types (CLR, ", distance, ", ", linkage, ")"))
 p_dend_plain
 save_plot(p_dend_plain, "dendrogram.pdf", width = 10, height = 6)
 ```
@@ -224,8 +327,6 @@ Continuous sample metadata per community (Kruskal-Wallis p-value in each title):
 ```{r boxplots, fig.height=4, fig.width=12}
 cont_vars <- c(pct_tumor = "% tumor cells", het_tumor = "tumor heterogeneity",
                het_immune = "immune heterogeneity", age_diag = "age at diagnosis [months]")
-community_palette <- setNames(viridisLite::viridis(max(8, length(community_levels)))[seq_along(community_levels)],
-                              community_levels)
 box_list <- lapply(names(cont_vars), function(v) {
   d <- samples[!is.na(samples[[v]]), ]
   p_kw <- if (length(unique(d$community)) > 1) signif(kruskal.test(d[[v]] ~ d$community)$p.value, 2) else NA
@@ -241,83 +342,126 @@ p_box
 save_plot(p_box, "boxplots_metadata.pdf", width = 12, height = 4)
 ```
 
-## Combined figure (stacked panels)
+## Combined figures (stacked panels)
 
-As in MapMetSC's Fig 3a, the panels share the dendrogram sample order, with a blank spacer column between communities: dendrogram, all-cell-type composition (the clustering input), BM sample type and genetic / clinical tracks, tumor cell types (within the tumor cells), immune cell types (within the immune cells) and metaclusters.
+As in MapMetSC's Fig 3a, the panels share one sample order, with a blank spacer column between sample groups: dendrogram, the composition used for the clustering, BM sample type, community and genetic / clinical tracks, tumor cell types (within the tumor cells), immune cell types (within the immune cells) and metaclusters. Legends are laid out in two columns.
 
-```{r combined-figure, fig.width=14, fig.height=14}
+* `combined_stacked.pdf`: samples in dendrogram order, grouped by community;
+* `combined_stacked_by_timepoint.pdf`: samples grouped by BM sample type (`r paste(tp_levels, collapse = " / ")`) and, within each group, ordered by their own clustering (same CLR distance and Ward.D2 linkage, one dendrogram per group).
+
+```{r stacked-helpers}
 X_EXPAND <- expansion(add = 0.5)
+LEG2 <- guide_legend(ncol = 2)
 
-# ---- Spacer columns between communities ----
-comm_seq     <- as.character(samples[clustered_samples, "community"])
-N            <- length(clustered_samples)
-boundary_idx <- which(comm_seq[-1] != comm_seq[-N])
-lev_spaced   <- clustered_samples
-for (b in rev(seq_along(boundary_idx)))
-  lev_spaced <- append(lev_spaced, paste0("__gap__", b), after = boundary_idx[b])
-M        <- length(lev_spaced)
-remap_x  <- function(v) v + vapply(v, function(z) sum(boundary_idx < z), numeric(1))
-real_pos <- remap_x(seq_len(N))
+# ordered: sample ids in plotting order; group: group label per ordered sample;
+# segs: dendrogram segments on the 1..N sample axis (or NULL)
+stacked_figure <- function(ordered, group, segs, top_title, clustering_title) {
+  N <- length(ordered)
+  boundary_idx <- which(group[-1] != group[-N])
+  lev_spaced <- ordered
+  for (b in rev(seq_along(boundary_idx)))
+    lev_spaced <- append(lev_spaced, paste0("__gap__", b), after = boundary_idx[b])
+  M        <- length(lev_spaced)
+  remap_x  <- function(v) v + vapply(v, function(z) sum(boundary_idx < z), numeric(1))
+  real_pos <- remap_x(seq_len(N))
 
-# ---- Dendrogram on the spaced axis, with community labels ----
-segs <- segment(dendro_data(hc, type = "rectangle"))
-segs$x <- remap_x(segs$x); segs$xend <- remap_x(segs$xend)
-h_root <- max(c(segs$y, segs$yend))
-comm_label_df <- data.frame(
-  x = vapply(community_levels, function(cc) mean(real_pos[comm_seq == cc]), numeric(1)),
-  y = h_root * 1.08, label = community_levels)
-p_dendro <- ggplot(segs) +
-  geom_segment(aes(x = x, y = y, xend = xend, yend = yend)) +
-  geom_text(data = comm_label_df, aes(x = x, y = y, label = label), fontface = "bold", size = 4) +
-  scale_x_continuous(limits = c(0.5, M + 0.5), expand = c(0, 0)) +
-  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
-  labs(title = "Community") +
-  theme_void() +
-  theme(plot.title = element_text(face = "bold", size = 11, hjust = 0.5), plot.margin = margin(2, 2, 0, 2))
-
-# ---- Composition barplots (% of the cells in the panel's subset) ----
-comp_bar <- function(d, var, cols, legend_title) {
-  tab <- d %>% count(fm_id, value = .data[[var]]) %>%
-    group_by(fm_id) %>% mutate(pct = 100 * n / sum(n)) %>% ungroup() %>%
-    mutate(fm_id = factor(fm_id, levels = lev_spaced))
-  ggplot(tab, aes(fm_id, pct, fill = value)) +
-    geom_col(width = 0.9) +
-    scale_x_discrete(drop = FALSE, expand = X_EXPAND) +
-    scale_y_continuous(expand = c(0, 0)) +
-    scale_fill_manual(values = cols, name = legend_title, drop = TRUE) +
-    labs(y = "%") +
-    theme_classic() +
-    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), axis.title.x = element_blank(),
-          axis.line.x = element_blank(), plot.margin = margin(0, 2, 0, 2))
-}
-cells_k <- cells[cells$fm_id %in% clustered_samples, ]
-p_all    <- comp_bar(cells_k, "celltype", col_celltype, "All cell types")
-p_tumor  <- comp_bar(cells_k[cells_k$metacluster == "tumor", ], "celltype", col_celltype, "Tumor cell types")
-p_immune <- comp_bar(cells_k[cells_k$metacluster %in% immune_meta, ], "celltype", col_celltype, "Immune cell types")
-p_meta   <- comp_bar(cells_k, "metacluster", col_metacluster, "Metaclusters")
-
-# ---- Metadata strips ----
-meta_df <- samples[clustered_samples, ]
-meta_df$fm_id <- factor(meta_df$fm_id, levels = lev_spaced)
-strip <- function(var, cols, name) {
-  ggplot(meta_df, aes(fm_id, 1, fill = as.character(.data[[var]]))) +
-    geom_tile() +
-    scale_x_discrete(drop = FALSE, expand = X_EXPAND) +
-    scale_fill_manual(values = cols, name = name, na.value = "white") +
-    labs(y = name) +
+  # ---- top panel: dendrogram(s) and group labels ----
+  grp_lev <- unique(group)
+  h_root  <- if (!is.null(segs) && nrow(segs)) max(c(segs$y, segs$yend)) else 1
+  lab_df  <- data.frame(x = vapply(grp_lev, function(g) mean(real_pos[group == g]), numeric(1)),
+                        y = h_root * 1.08, label = grp_lev)
+  p_top <- ggplot() +
+    geom_text(data = lab_df, aes(x = x, y = y, label = label), fontface = "bold", size = 4) +
+    scale_x_continuous(limits = c(0.5, M + 0.5), expand = c(0, 0)) +
+    scale_y_continuous(limits = c(0, h_root * 1.15), expand = c(0, 0)) +
+    labs(title = top_title) +
     theme_void() +
-    theme(axis.title.y = element_text(angle = 0, vjust = 0.5, hjust = 1, size = 8),
-          plot.margin = margin(0, 2, 0, 2))
-}
-p_tp   <- strip("timepoint", COL_TIMEPOINT, "BM sample")
-p_mycn <- strip("mycn",   COL_YNH, "MYCN amp.")
-p_1p   <- strip("loss1p", COL_YNH, "1p loss")
-p_prog <- strip("prog",   COL_YNH, "progression")
+    theme(plot.title = element_text(face = "bold", size = 11, hjust = 0.5), plot.margin = margin(2, 2, 0, 2))
+  if (!is.null(segs) && nrow(segs)) {
+    segs$x <- remap_x(segs$x); segs$xend <- remap_x(segs$xend)
+    p_top <- p_top + geom_segment(data = segs, aes(x = x, y = y, xend = xend, yend = yend))
+  }
 
-p_combined <- (p_dendro / p_all / p_tp / p_mycn / p_1p / p_prog / p_tumor / p_immune / p_meta) +
-  plot_layout(ncol = 1, heights = c(2, 4, 0.3, 0.3, 0.3, 0.3, 3, 3, 3), guides = "collect")
+  # ---- composition barplots (% of the cells in the panel's subset) ----
+  comp_bar <- function(d, var, cols, legend_title) {
+    tab <- d %>% count(fm_id, value = .data[[var]]) %>%
+      group_by(fm_id) %>% mutate(pct = 100 * n / sum(n)) %>% ungroup() %>%
+      mutate(fm_id = factor(fm_id, levels = lev_spaced))
+    ggplot(tab, aes(fm_id, pct, fill = value)) +
+      geom_col(width = 0.9) +
+      scale_x_discrete(drop = FALSE, expand = X_EXPAND) +
+      scale_y_continuous(expand = c(0, 0)) +
+      scale_fill_manual(values = cols, name = legend_title, drop = TRUE, guide = LEG2) +
+      labs(y = "%") +
+      theme_classic() +
+      theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), axis.title.x = element_blank(),
+            axis.line.x = element_blank(), plot.margin = margin(0, 2, 0, 2))
+  }
+  cells_k  <- cells[cells$fm_id %in% ordered, ]
+  p_clust  <- comp_bar(if (params$cluster_on == "immune") cells_k[cells_k$metacluster %in% immune_meta, ] else cells_k,
+                       "celltype", col_celltype, clustering_title)
+  p_all    <- comp_bar(cells_k, "celltype", col_celltype, "All cell types")
+  p_tumor  <- comp_bar(cells_k[cells_k$metacluster == "tumor", ], "celltype", col_celltype, "Tumor cell types")
+  p_immune <- comp_bar(cells_k[cells_k$metacluster %in% immune_meta, ], "celltype", col_celltype, "Immune cell types")
+  p_meta   <- comp_bar(cells_k, "metacluster", col_metacluster, "Metaclusters")
+
+  # ---- metadata strips ----
+  meta_df <- samples[ordered, ]
+  meta_df$fm_id <- factor(meta_df$fm_id, levels = lev_spaced)
+  strip <- function(var, cols, name) {
+    ggplot(meta_df, aes(fm_id, 1, fill = as.character(.data[[var]]))) +
+      geom_tile() +
+      scale_x_discrete(drop = FALSE, expand = X_EXPAND) +
+      scale_fill_manual(values = cols, name = name, na.value = "white", guide = LEG2) +
+      labs(y = name) +
+      theme_void() +
+      theme(axis.title.y = element_text(angle = 0, vjust = 0.5, hjust = 1, size = 8),
+            plot.margin = margin(0, 2, 0, 2))
+  }
+  strips <- list(strip("timepoint", COL_TIMEPOINT, "BM sample"),
+                 strip("community", community_palette, "community"),
+                 strip("mycn",   COL_YNH, "MYCN amp."),
+                 strip("loss1p", COL_YNH, "1p loss"),
+                 strip("prog",   COL_YNH, "progression"))
+
+  # clustering on all cell types: the clustering panel is the all-cell-type panel
+  panels  <- c(list(p_top, p_clust), strips,
+               if (params$cluster_on == "immune") list(p_all) else NULL,
+               list(p_tumor, p_immune, p_meta))
+  heights <- c(2, 4, rep(0.3, length(strips)), if (params$cluster_on == "immune") 3 else NULL, 3, 3, 3)
+  wrap_plots(panels, ncol = 1) + plot_layout(heights = heights, guides = "collect")
+}
+fig_width  <- function(M) max(14, 8 + 0.05 * M)   # wider for the two-column legends
+clust_title <- if (params$cluster_on == "immune") "Immune cell types (clustering)" else "All cell types (clustering)"
+```
+
+```{r combined-figure, fig.width=18, fig.height=15}
+segs <- segment(dendro_data(hc, type = "rectangle"))
+p_combined <- stacked_figure(clustered_samples, as.character(samples[clustered_samples, "community"]),
+                             segs, "Community", clust_title)
 p_combined
-save_plot(p_combined, "combined_stacked.pdf", width = max(10, 4 + 0.05 * M), height = 14)
+save_plot(p_combined, "combined_stacked.pdf", width = fig_width(length(clustered_samples)), height = 15)
+```
+
+```{r combined-figure-by-timepoint, fig.width=18, fig.height=15}
+# Within each BM sample type: own Ward.D2 clustering on the same CLR values
+ord_tp <- character(0); segs_tp <- NULL; offset <- 0
+for (tp in tp_levels) {
+  ids <- samples$fm_id[samples$timepoint == tp]
+  ids <- ids[ids %in% rownames(clr_df)]
+  if (length(ids) >= 2) {
+    hc_tp <- hclust(dist(clr_df[ids, , drop = FALSE], method = distance), method = linkage)
+    s_tp  <- segment(dendro_data(hc_tp, type = "rectangle"))
+    s_tp$x <- s_tp$x + offset; s_tp$xend <- s_tp$xend + offset
+    segs_tp <- rbind(segs_tp, s_tp)
+    ids <- ids[hc_tp$order]
+  }
+  ord_tp <- c(ord_tp, ids); offset <- offset + length(ids)
+}
+p_combined_tp <- stacked_figure(ord_tp, as.character(samples[ord_tp, "timepoint"]),
+                                segs_tp, "BM sample", clust_title)
+p_combined_tp
+save_plot(p_combined_tp, "combined_stacked_by_timepoint.pdf", width = fig_width(length(ord_tp)), height = 15)
 ```
 
 ## Session Info
