@@ -39,7 +39,7 @@ Shared colors and the timepoint labels are defined once in
 Every UMAP plot shows the same random subset of at most `umap_max_cells` cells
 (default 50,000, set in `run_analysis.R`); the UMAP embedding itself is
 computed on all cells, once, and then reused from `R_intermediary/umap_BM.rds`. The number of communities per
-5.1 variant (`n_communities`, default 3, or `"auto"`), the 5.1 variant whose
+5.1 variant (`n_communities`: default `"auto"`, or a number), the 5.1 variant whose
 communities 5.2 compares (`community_variant`) and the minimum cells per sample
 for 5.1 and 5.2 (`min_cells_sample`, default 100) are set in `run_analysis.R` too.
 Each script reads the object written by the previous step, so the steps run in

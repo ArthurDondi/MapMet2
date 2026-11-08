@@ -53,10 +53,10 @@ umap_max_cells      <- 50000      # 04 / 06.x: cells drawn per UMAP plot (random
 # 05.1: communities cut from each sample dendrogram, per variant
 # (<clustered on>_<with|without>_controls); a number, or "auto" = the largest k
 # whose communities are all bootstrap-stable (see 05.1, "Number of communities")
-n_communities <- c(all_with_controls       = 3,
-                   all_without_controls    = 3,
-                   immune_with_controls    = 3,
-                   immune_without_controls = 3)
+n_communities <- c(all_with_controls       = "auto",
+                   all_without_controls    = "auto",
+                   immune_with_controls    = "auto",
+                   immune_without_controls = "auto")
 community_variant   <- "all_without_controls"  # 05.2: 05.1 variant whose communities are compared ("" = none)
 min_cells_sample    <- 100        # 05.1 / 05.2: samples with fewer cells are left out (communities, DA)
 annotation_file     <- Sys.getenv("MAPMET2_ANNOTATION", "")               # "" = the workbook in <output>/annotation/ (see 04)

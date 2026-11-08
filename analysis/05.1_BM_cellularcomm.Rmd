@@ -16,7 +16,7 @@ params:
   cluster_on: "all"
   # Number of communities cut from the sample dendrogram, or "auto" (the largest
   # k whose communities are all bootstrap-stable, see "Number of communities")
-  n_communities: 3
+  n_communities: "auto"
   # k values compared in "Number of communities": 2..k_max
   k_max: 8
   # Bootstrap resamples for the cluster stability (Jaccard)
@@ -67,7 +67,7 @@ knitr::opts_chunk$set(
 
 Adapted from MapMetSC's `05.1_PT_DE_cellularcomm.Rmd`, which clusters diagnostic primary tumors on their tumor cell-type composition. Here we cluster **bone-marrow samples** on the composition of `r if (params$cluster_on == "immune") "their **immune cell types** (within the immune cells)" else "**all their cell types**"`. This report is the variant **`r variant`**: `r if (isTRUE(params$include_controls)) "all BM samples, including the normal control BM" else "the NB-patient BM samples only (DE, T1, T2, REL), without the normal control BM"`.
 
-The combined figures stack the sample dendrogram, the composition used for the clustering, the BM sample type (timepoint), the community and the patient-level genetic / clinical tracks, and the tumor, immune and metacluster compositions; a second version groups the samples by BM sample type and orders them by clustering within each group.
+The combined figures stack the sample dendrogram, the composition used for the clustering, the BM sample type (timepoint), the community, the patient-level genetic / clinical tracks, the age at diagnosis and the tumor / immune heterogeneity (Shannon entropy), and the tumor, immune and metacluster compositions; a second version groups the samples by BM sample type and orders them by clustering within each group.
 
 ## Load libraries
 <details>
@@ -418,11 +418,27 @@ stacked_figure <- function(ordered, group, segs, top_title, clustering_title) {
       theme(axis.title.y = element_text(angle = 0, vjust = 0.5, hjust = 1, size = 8),
             plot.margin = margin(0, 2, 0, 2))
   }
+  # continuous tracks (as in the age / TU het. / ME het. rows of published BM figures)
+  strip_cont <- function(var, name, option) {
+    ggplot(meta_df, aes(fm_id, 1, fill = .data[[var]])) +
+      geom_tile() +
+      scale_x_discrete(drop = FALSE, expand = X_EXPAND) +
+      scale_fill_viridis_c(option = option, name = name, na.value = "white",
+                           guide = guide_colourbar(direction = "horizontal", title.position = "top",
+                                                   barheight = grid::unit(0.3, "cm"))) +
+      labs(y = name) +
+      theme_void() +
+      theme(axis.title.y = element_text(angle = 0, vjust = 0.5, hjust = 1, size = 8),
+            plot.margin = margin(0, 2, 0, 2))
+  }
   strips <- list(strip("timepoint", COL_TIMEPOINT, "BM sample"),
                  strip("community", community_palette, "community"),
                  strip("mycn",   COL_YNH, "MYCN amp."),
                  strip("loss1p", COL_YNH, "1p loss"),
-                 strip("prog",   COL_YNH, "progression"))
+                 strip("prog",   COL_YNH, "progression"),
+                 strip_cont("age_diag",   "age [months]", "magma"),
+                 strip_cont("het_tumor",  "TU het.",      "viridis"),
+                 strip_cont("het_immune", "immune het.",  "cividis"))
 
   # clustering on all cell types: the clustering panel is the all-cell-type panel
   panels  <- c(list(p_top, p_clust), strips,
