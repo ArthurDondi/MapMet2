@@ -439,6 +439,53 @@ for (lvl_name in names(levels_cfg)) {
 }
 ```
 
+## Relapse patients with an earlier BM sample
+
+The patients with a relapse (REL) sample and at least one other BM sample (DE, T1 or T2): every cluster on its own panel, one line per patient joining that patient's samples (% of the cells of the level's compartment; the mean when a patient has several samples at one timepoint). Descriptive; `REL_vs_DE` above is the test.
+
+```{r relapse-patients, fig.width=14, fig.height=12}
+rel_pat <- unique(samples$patient_id[samples$timepoint == "REL"])
+rel_pat <- rel_pat[vapply(rel_pat, function(p) any(samples$timepoint[samples$patient_id == p] %in% c("DE", "T1", "T2")), logical(1))]
+cat("Relapse patients with an earlier BM sample:", length(rel_pat), "\n")
+if (length(rel_pat)) {
+  tp_rel  <- intersect(c("DE", "T1", "T2", "REL"), unique(samples$timepoint[samples$patient_id %in% rel_pat]))
+  col_pat <- setNames(grDevices::hcl.colors(max(3, length(rel_pat)), "Dark 3")[seq_along(rel_pat)], rel_pat)
+  for (lvl_name in names(levels_cfg)) {
+    lvl <- levels_cfg[[lvl_name]]
+    d <- cells[cells$fm_id %in% samples$fm_id[samples$patient_id %in% rel_pat & samples$timepoint %in% tp_rel], ]
+    if (!is.null(lvl$compartment)) d <- d[as.character(d$metacluster) %in% lvl$compartment, ]
+    d$cluster_id <- droplevels(d[[lvl$var]])
+    d <- d[!is.na(d$cluster_id), ]
+    n_comp <- table(d$fm_id)
+    d <- d[d$fm_id %in% names(n_comp)[n_comp >= params$min_cells_compartment], ]
+    if (!nrow(d)) next
+    counts <- table(factor(d$fm_id), d$cluster_id)
+    freq <- as.data.frame(as.table(100 * counts / rowSums(counts)), stringsAsFactors = FALSE)
+    colnames(freq) <- c("fm_id", "cluster_id", "Freq")
+    freq$patient   <- samples[freq$fm_id, "patient_id"]
+    freq$timepoint <- samples[freq$fm_id, "timepoint"]
+    freq <- freq %>% group_by(patient, timepoint, cluster_id) %>% summarise(Freq = mean(Freq), .groups = "drop")
+    freq$timepoint  <- factor(freq$timepoint, levels = tp_rel)
+    freq$cluster_id <- factor(freq$cluster_id, levels = levels(d$cluster_id))
+    p <- ggplot(freq, aes(timepoint, Freq, colour = patient, group = patient)) +
+      geom_line(linewidth = 0.5) +
+      geom_point(size = 1.8) +
+      facet_wrap(~ cluster_id, scales = "free_y") +
+      scale_colour_manual(values = col_pat) +
+      scale_x_discrete(drop = FALSE) +
+      labs(x = NULL, y = "% abundance", colour = "patient",
+           title = paste0(lvl_name, if (!is.null(lvl$compartment)) " (within the compartment)" else "",
+                          ": relapse patients with an earlier BM sample")) +
+      theme_bw(base_size = 9) +
+      theme(strip.text = element_text(size = 7))
+    print(p)
+    n_cl  <- nlevels(freq$cluster_id); n_col <- ceiling(sqrt(n_cl))
+    save_plot(p, paste0("relapse_patients_", lvl_name, ".pdf"),
+              width = 2.2 * n_col + 2, height = 2 * ceiling(n_cl / n_col) + 1)
+  }
+}
+```
+
 ## Session Info
 
 <details>

@@ -52,7 +52,12 @@ COL_CELLTYPE <- c(
   "fibroblast/endothel"       = rgb(101,  67,  33, maxColorValue = 255),
 
   ## Other
-  "other"                     = rgb(120, 120, 120, maxColorValue = 255)
+  "other"                     = rgb(120, 120, 120, maxColorValue = 255),
+
+  ## MapMet2 (BM) cell types
+  "HSPCs"                     = "#FFA500",  # plain orange
+  "CD4+ PD1+ T cells"         = "#B5475D",  # light bordeaux
+  "pDC"                       = "#0000FF"   # pure blue: far from every other blue (granulocytes, CD14+ MO, GZMB+ DC/NK)
 )
 
 # ---- Metaclusters (04_phenotyping.Rmd) -------------------------------------
@@ -151,7 +156,8 @@ COL_VECTOR_433 <- grDevices::colors()[grep("gr(a|e)y", grDevices::colors(), inve
 
 # ---- MapMet2 names that take the color of a MapMetSC name -----------------
 PALETTE_ALIASES <- c(
-  "GD2low Tu" = "GD2neg Tu"
+  "GD2low Tu"                = "GD2neg Tu",
+  "PDL1+ neuroblast-like Tu" = "Ki67+ Tu"
 )
 
 # ---- Helper: complete a named palette for a set of labels -------------------

@@ -57,7 +57,7 @@ plot_cluster_bubble <- function(cluster_col, save_name,
                                 metacluster_col = "metacluster",
                                 group_col       = NULL,
                                 group_colors    = NULL,
-                                ncells_break_at = 50000,
+                                ncells_break_at = 40000,
                                 column_title    = "",
                                 plot_width      = 16,
                                 plot_height     = 14,
@@ -179,20 +179,21 @@ plot_cluster_bubble <- function(cluster_col, save_name,
         axis_param  = list(
           at     = at,
           labels = ifelse(at == 0, "0", ifelse(at >= 1000, paste0(at / 1000, "k"), as.character(at))),
-          gp     = gpar(fontsize = 12)
+          gp     = gpar(fontsize = if (few_ticks) 10 else 12)
         ),
         needs_break = FALSE
       ))
     }
 
     # Break case: compress above-break bars into a small top band
-    top_frac   <- 0.18
+    # (top band large enough that the break label and the max label do not overlap)
+    top_frac   <- 0.5
     break_frac <- 1 - top_frac
     top_ext    <- ncells_break_at * (top_frac / break_frac)
     ylim_max   <- ncells_break_at + top_ext
 
-    # Above-break bars are drawn at 90% of the top band
-    above_display <- ncells_break_at + top_ext * 0.9
+    # Above-break bars are drawn at 95% of the top band
+    above_display <- ncells_break_at + top_ext * 0.95
     values_plot   <- ifelse(v_num > ncells_break_at, above_display, v_num)
 
     at_below   <- if (few_ticks) c(0, ncells_break_at) else seq(0, ncells_break_at, by = 10000)
@@ -208,7 +209,7 @@ plot_cluster_bubble <- function(cluster_col, save_name,
       axis_param       = list(
         at     = at_all,
         labels = labels_all,
-        gp     = gpar(fontsize = 12)
+        gp     = gpar(fontsize = if (few_ticks) 10 else 12)
       ),
       needs_break      = TRUE,
       break_y_npc      = ncells_break_at / ylim_max,

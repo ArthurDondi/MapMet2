@@ -11,8 +11,9 @@ params:
   output: !r Sys.getenv("MAPMET2_OUTPUT", "/mnt/data/output_mapmet2")
   # TRUE: all BM samples incl. the normal control BM; FALSE: NB-patient samples only
   include_controls: TRUE
-  # Composition the samples are clustered on: "all" (all cell types) or
-  # "immune" (immune cell types, within the immune cells)
+  # Composition the samples are clustered on: "all" (all cell types),
+  # "immune" (immune cell types, within the immune cells) or "tcell" (T-cell
+  # types, within the cells of the "T cells" metacluster)
   cluster_on: "all"
   # Number of communities cut from the sample dendrogram, or "auto" (the largest
   # k whose communities are all bootstrap-stable, see "Number of communities")
@@ -23,7 +24,7 @@ params:
   n_boot: 100
   # Samples with fewer cells are left out (their composition is too noisy)
   min_cells: 100
-  # ... and, for cluster_on = "immune", samples with fewer immune cells
+  # ... and, for cluster_on = "immune" / "tcell", samples with fewer cells in that compartment
   min_cells_compartment: 10
 ---
 
@@ -65,9 +66,9 @@ knitr::opts_chunk$set(
 
 # Cellular communities in bone-marrow samples {#bm-cellularcomm}
 
-Adapted from MapMetSC's `05.1_PT_DE_cellularcomm.Rmd`, which clusters diagnostic primary tumors on their tumor cell-type composition. Here we cluster **bone-marrow samples** on the composition of `r if (params$cluster_on == "immune") "their **immune cell types** (within the immune cells)" else "**all their cell types**"`. This report is the variant **`r variant`**: `r if (isTRUE(params$include_controls)) "all BM samples, including the normal control BM" else "the NB-patient BM samples only (DE, T1, T2, REL), without the normal control BM"`.
+Adapted from MapMetSC's `05.1_PT_DE_cellularcomm.Rmd`, which clusters diagnostic primary tumors on their tumor cell-type composition. Here we cluster **bone-marrow samples** on the composition of `r c(all = "**all their cell types**", immune = "their **immune cell types** (within the immune cells)", tcell = "their **T-cell types** (within the T cells)")[[params$cluster_on]]`. This report is the variant **`r variant`**: `r if (isTRUE(params$include_controls)) "all BM samples, including the normal control BM" else "the NB-patient BM samples only (DE, T1, T2, REL), without the normal control BM"`.
 
-The combined figures stack the sample dendrogram, the composition used for the clustering, the BM sample type (timepoint), the community, the patient-level genetic / clinical tracks, the age at diagnosis and the tumor / immune heterogeneity (Shannon entropy), and the tumor, immune and metacluster compositions; a second version groups the samples by BM sample type and orders them by clustering within each group.
+The combined figures stack the sample dendrogram, the composition used for the clustering, the BM sample type (timepoint), the community, the patient-level genetic / clinical tracks, the age at diagnosis and the tumor / immune heterogeneity (Shannon entropy), and the tumor, immune and metacluster compositions (clustered on immune or T-cell types, the all-cell-type composition replaces the immune one, so every variant has the same panels); a second version groups the samples by BM sample type and orders them by clustering within each group.
 
 ## Load libraries
 <details>
@@ -106,12 +107,22 @@ rm(spe); invisible(gc())
 # Immune compartment (as in MapMetSC: not tumor, mesenchymal or other)
 immune_meta <- setdiff(unique(as.character(cells$metacluster)), c("tumor", "mesenchymal", "other", NA))
 
-# Samples with too few cells (or immune cells, when clustering on them) are left out
+# T cells: the metacluster named "T cells" (matched ignoring case / punctuation / plural)
+tcell_meta <- unique(as.character(cells$metacluster))
+tcell_meta <- tcell_meta[!is.na(tcell_meta) & norm_label(tcell_meta) == "tcell"]
+
+# Compartment the samples are clustered on (NULL = all cells)
+stopifnot(params$cluster_on %in% c("all", "immune", "tcell"))
+clust_meta <- switch(params$cluster_on, all = NULL, immune = immune_meta, tcell = tcell_meta)
+if (params$cluster_on == "tcell" && !length(clust_meta))
+  stop("cluster_on = \"tcell\": no metacluster named \"T cells\" in the annotation.")
+
+# Samples with too few cells (or cells of the clustering compartment) are left out
 n_per_sample <- table(cells$fm_id)
 too_small    <- names(n_per_sample)[n_per_sample < params$min_cells]
-if (params$cluster_on == "immune") {
-  n_imm <- table(factor(cells$fm_id[cells$metacluster %in% immune_meta], levels = names(n_per_sample)))
-  too_small <- union(too_small, names(n_imm)[n_imm < params$min_cells_compartment])
+if (!is.null(clust_meta)) {
+  n_comp <- table(factor(cells$fm_id[cells$metacluster %in% clust_meta], levels = names(n_per_sample)))
+  too_small <- union(too_small, names(n_comp)[n_comp < params$min_cells_compartment])
 }
 if (length(too_small))
   message(length(too_small), " sample(s) left out (too few cells): ", paste(too_small, collapse = ", "))
@@ -169,7 +180,7 @@ distance   <- "euclidean"
 linkage    <- "ward.D2"
 CLR_PSEUDO <- 0.5
 
-clust_cells <- if (params$cluster_on == "immune") cells[cells$metacluster %in% immune_meta, ] else cells
+clust_cells <- if (!is.null(clust_meta)) cells[cells$metacluster %in% clust_meta, ] else cells
 counts_ct <- as.matrix(table(factor(clust_cells$fm_id, levels = samples$fm_id), droplevels(clust_cells$celltype)))
 counts_ct <- counts_ct[, colSums(counts_ct) > 0, drop = FALSE]
 prop_ct   <- counts_ct / rowSums(counts_ct)
@@ -188,7 +199,7 @@ Three criteria for the number of communities k, all computed on the same CLR dis
 * **gap statistic** ([Tibshirani et al. 2001](https://doi.org/10.1111/1467-9868.00293)): within-community dispersion compared with uniform reference data; the k chosen with the "first SE max" rule;
 * **bootstrap stability** ([Hennig 2007](https://doi.org/10.1016/j.csda.2006.11.025)): the samples are resampled `r params$n_boot` times and re-clustered; for each community, the mean Jaccard similarity with its best-matching bootstrap community. Hennig's guide: < 0.6 the community dissolves, ≥ 0.75 it is stable. The plot shows the least stable community of each k.
 
-`n_communities = "auto"` takes the largest k whose least stable community still has a mean bootstrap Jaccard ≥ 0.75 (every community stable), and the gap-statistic k if no k passes; otherwise `n_communities` is used as set (`r params$n_communities` here). The average silhouette width tends to favour k = 2 when one group of samples is very distinct, so it is reported but not used for the choice.
+At least 2 communities are always cut. `n_communities = "auto"` takes the largest k whose least stable community still has a mean bootstrap Jaccard ≥ 0.75 (every community stable), and the gap-statistic k if no k passes; otherwise `n_communities` is used as set (`r params$n_communities` here). The average silhouette width tends to favour k = 2 when one group of samples is very distinct, so it is reported but not used for the choice.
 
 ```{r choose-k, fig.width=12, fig.height=4}
 k_range  <- 2:max(2, min(params$k_max, nrow(clr_df) - 1))
@@ -199,7 +210,7 @@ sil_width <- vapply(k_range, function(k)
 
 set.seed(20231103)
 gap    <- clusGap(clr_df, FUNcluster = hc_cut, K.max = max(k_range), B = params$n_boot, verbose = FALSE)
-gap_k  <- maxSE(gap$Tab[, "gap"], gap$Tab[, "SE.sim"], method = "firstSEmax")
+gap_k  <- max(2, maxSE(gap$Tab[, "gap"], gap$Tab[, "SE.sim"], method = "firstSEmax"))   # at least 2 communities
 
 # Bootstrap stability (clusterwise Jaccard, as fpc::clusterboot)
 set.seed(20231103)
@@ -237,6 +248,7 @@ knitr::kable(k_diag, digits = 3,
 write.csv(k_diag, file.path(plot_dir, paste0(date_prefix, "_n_communities_criteria.csv")), row.names = FALSE)
 
 n_comm <- if (identical(as.character(params$n_communities), "auto")) stab_k else as.integer(params$n_communities)
+n_comm <- max(2L, as.integer(n_comm))   # at least 2 communities
 message("[05.1 ", variant, "] k: stability = ", stab_k, ", gap = ", gap_k, ", silhouette = ", sil_k, "; using ", n_comm)
 
 k_long <- rbind(
@@ -398,7 +410,7 @@ stacked_figure <- function(ordered, group, segs, top_title, clustering_title) {
             axis.line.x = element_blank(), plot.margin = margin(0, 2, 0, 2))
   }
   cells_k  <- cells[cells$fm_id %in% ordered, ]
-  p_clust  <- comp_bar(if (params$cluster_on == "immune") cells_k[cells_k$metacluster %in% immune_meta, ] else cells_k,
+  p_clust  <- comp_bar(if (!is.null(clust_meta)) cells_k[cells_k$metacluster %in% clust_meta, ] else cells_k,
                        "celltype", col_celltype, clustering_title)
   p_all    <- comp_bar(cells_k, "celltype", col_celltype, "All cell types")
   p_tumor  <- comp_bar(cells_k[cells_k$metacluster == "tumor", ], "celltype", col_celltype, "Tumor cell types")
@@ -440,15 +452,18 @@ stacked_figure <- function(ordered, group, segs, top_title, clustering_title) {
                  strip_cont("het_tumor",  "TU het.",      "viridis"),
                  strip_cont("het_immune", "immune het.",  "cividis"))
 
-  # clustering on all cell types: the clustering panel is the all-cell-type panel
+  # Same number of panels in every variant: clustered on all cell types, the
+  # clustering panel is the all-cell-type panel (+ immune panel); clustered on
+  # immune / T-cell types, the all-cell-type panel replaces the immune panel.
   panels  <- c(list(p_top, p_clust), strips,
-               if (params$cluster_on == "immune") list(p_all) else NULL,
-               list(p_tumor, p_immune, p_meta))
-  heights <- c(2, 4, rep(0.3, length(strips)), if (params$cluster_on == "immune") 3 else NULL, 3, 3, 3)
+               if (params$cluster_on == "all") list(p_tumor, p_immune) else list(p_all, p_tumor),
+               list(p_meta))
+  heights <- c(2, 4, rep(0.3, length(strips)), 3, 3, 3)
   wrap_plots(panels, ncol = 1) + plot_layout(heights = heights, guides = "collect")
 }
 fig_width  <- function(M) max(14, 8 + 0.05 * M)   # wider for the two-column legends
-clust_title <- if (params$cluster_on == "immune") "Immune cell types (clustering)" else "All cell types (clustering)"
+clust_title <- c(all = "All cell types (clustering)", immune = "Immune cell types (clustering)",
+                 tcell = "T-cell types (clustering)")[[params$cluster_on]]
 ```
 
 ```{r combined-figure, fig.width=18, fig.height=15}

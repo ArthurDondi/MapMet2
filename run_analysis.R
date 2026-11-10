@@ -56,7 +56,9 @@ umap_max_cells      <- 50000      # 04 / 06.x: cells drawn per UMAP plot (random
 n_communities <- c(all_with_controls       = "auto",
                    all_without_controls    = "auto",
                    immune_with_controls    = "auto",
-                   immune_without_controls = "auto")
+                   immune_without_controls = "auto",
+                   tcell_with_controls     = "auto",
+                   tcell_without_controls  = "auto")
 community_variant   <- "all_without_controls"  # 05.2: 05.1 variant whose communities are compared ("" = none)
 min_cells_sample    <- 100        # 05.1 / 05.2: samples with fewer cells are left out (communities, DA)
 annotation_file     <- Sys.getenv("MAPMET2_ANNOTATION", "")               # "" = the workbook in <output>/annotation/ (see 04)
@@ -140,8 +142,8 @@ if (!annotated) {
           file.path(output, "annotation"), ") and run run_analysis.R again.")
 } else {
   # --- BM sample analysis: cellular communities (05.1) and DA (05.2) --------
-  # 05.1 is rendered four times: samples clustered on all / on immune cell
-  # types, each with and without the normal control BM. Each variant is knit
+  # 05.1 is rendered once per variant: samples clustered on all / immune /
+  # T-cell types, each with and without the normal control BM. Each variant is knit
   # from its own temporary copy of the Rmd, so the HTML reports
   # (05.1_BM_cellularcomm_<variant>.html) keep separate figure folders
   # (workflowr names them after the Rmd).
