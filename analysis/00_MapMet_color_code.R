@@ -57,7 +57,8 @@ COL_CELLTYPE <- c(
   ## MapMet2 (BM) cell types
   "HSPCs"                     = "#FFA500",  # plain orange
   "CD4+ PD1+ T cells"         = "#B5475D",  # light bordeaux
-  "pDC"                       = "#0000FF"   # pure blue: far from every other blue (granulocytes, CD14+ MO, GZMB+ DC/NK)
+  "pDC"                       = "#6497D1",
+  "PDL1+ MO"                  = "#0073E6"   # blue (the fallback color was too close to B cells)
 )
 
 # ---- Metaclusters (04_phenotyping.Rmd) -------------------------------------
