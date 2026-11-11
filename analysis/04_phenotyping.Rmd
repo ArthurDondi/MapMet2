@@ -426,7 +426,7 @@ report_skipped(skipped, "per-cluster")
 
 ## Subclustering of mixed clusters using GMM
 
-As in MapMetSC, phenograph clusters that mix two cell types are split into two components by a Gaussian mixture model on selected markers. Here cluster 39 of the k = 15 clustering is split on MPO, CD15, GD2 and CD56; its second component gets the next free k = 15 cluster number. The split is set in `subcluster_map` / `marker_map` below. For every k, `pg_clusters_k<k>` holds the final clusters (phenograph clusters plus the GMM subclusters).
+As in MapMetSC, phenograph clusters that mix two cell types are split into two components by a Gaussian mixture model on selected markers. Here, in the k = 15 clustering, cluster 39 is split on MPO, CD15, GD2 and CD56, and cluster 32 on CD14 and CD274 (PD-L1); their second components get the next free k = 15 cluster numbers (39 first, then 32). The split is set in `subcluster_map` / `marker_map` below. For every k, `pg_clusters_k<k>` holds the final clusters (phenograph clusters plus the GMM subclusters).
 
 ```{r gmm-subclustering}
 set.seed(221228)
@@ -441,14 +441,18 @@ gmm_k   <- 15
 gmm_col <- paste0("pg_clusters_k", gmm_k)
 labs    <- colData(spe)[[gmm_col]]
 
-# original cluster -> label for its second GMM component (next free k = 15 number)
+# original cluster -> label for its second GMM component (next free k = 15
+# numbers, in this order; keep existing entries first so their numbers stay)
+max_lab <- max(as.integer(labs))
 subcluster_map <- list(
-  "39" = as.character(max(as.integer(labs)) + 1L)
+  "39" = as.character(max_lab + 1L),
+  "32" = as.character(max_lab + 2L)
 )
 
 # define marker sets per cluster
 marker_map <- list(
-  "39" = c("MPO_", "CD15_", "GD2_", "CD56_")
+  "39" = c("MPO_", "CD15_", "GD2_", "CD56_"),
+  "32" = c("CD14_", "CD274_")
 )
 
 for (cl in names(subcluster_map)) {
@@ -797,7 +801,36 @@ if (file.exists(template_file)) {
 template_annotated <- nrow(read_annotation(template_file)) > 0
 if (length(subcluster_map) && template_annotated) {
   if (file.exists(sub_file)) {
-    message("Keeping the existing annotation workbook ", sub_file)
+    # A split added since the workbook was written (its new subcluster has no
+    # row yet): replace the rows of that cluster and add its subcluster, both to
+    # annotate; every other row - your annotation - is kept. A dated backup of
+    # the previous workbook is written first.
+    sub_sheets <- readxl::excel_sheets(sub_file)
+    first <- as.data.frame(readxl::read_excel(sub_file, sheet = 1))
+    first_ids <- trimws(as.character(first$cluster))
+    new_split <- names(subcluster_map)[!unlist(subcluster_map, use.names = FALSE) %in% first_ids]
+    if (length(new_split)) {
+      ids  <- c(new_split, unlist(subcluster_map[new_split], use.names = FALSE))
+      rows <- make_k_tab(gmm_k, gmm_col)
+      rows <- rows[rows$cluster %in% ids, , drop = FALSE]
+      rows$celltype <- NA_character_; rows$metacluster <- NA_character_
+      rows$comments <- "GMM split - to annotate"
+      first <- first[!first_ids %in% ids, , drop = FALSE]
+      for (cn in setdiff(colnames(rows), colnames(first))) first[[cn]] <- rep(NA, nrow(first))
+      for (cn in setdiff(colnames(first), colnames(rows))) rows[[cn]]  <- rep(NA, nrow(rows))
+      first <- rbind(first, rows[, colnames(first), drop = FALSE])
+      first <- first[order(match(as.character(first$cluster), get_cluster_levels(first$cluster))), , drop = FALSE]
+      rest  <- setNames(lapply(sub_sheets[-1], function(sh)
+        as.data.frame(readxl::read_excel(sub_file, sheet = sh))), sub_sheets[-1])
+      rest  <- lapply(rest, function(d) if (ncol(d)) d else data.frame(empty = character(0)))
+      backup <- sub(".xlsx$", paste0("_backup_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".xlsx"), sub_file)
+      file.copy(sub_file, backup)
+      writexl::write_xlsx(c(setNames(list(first), sub_sheets[1]), rest), sub_file)
+      message("New GMM split of cluster(s) ", paste(new_split, collapse = ", "), ": rows ",
+              paste(ids, collapse = ", "), " of ", sub_file, " reset for annotation (backup: ", backup, ")")
+    } else {
+      message("Keeping the existing annotation workbook ", sub_file)
+    }
   } else {
     old_sheets <- readxl::excel_sheets(template_file)
     old <- setNames(lapply(old_sheets, function(sh)
@@ -896,10 +929,9 @@ pending_text <- paste0(
   if (!is.null(annotation_gap)) paste0(annotation_gap, "\n") else "",
   "Fill in the first tab '", first_tab, "' of\n  ", ann_file, "\nand run again.",
   if (identical(ann_file, sub_file))
-    paste0(" It lists the k = ", gmm_k, " clusters after the GMM split; the clusters that were not\n",
-           "split carry the annotation of the 'annotation' tab, the split cluster(s) ",
-           paste(c(names(subcluster_map), unlist(subcluster_map, use.names = FALSE)), collapse = ", "),
-           " are to annotate.")
+    paste0(" It lists the k = ", gmm_k, " clusters after the GMM split (split clusters and their\n",
+           "subclusters: ", paste(c(names(subcluster_map), unlist(subcluster_map, use.names = FALSE)), collapse = ", "),
+           "; comment 'GMM split - to annotate'); fill the rows listed as empty above.")
   else paste0(" Copy the rows of the chosen k from its k tab into it.",
               if (length(subcluster_map)) paste0("\nThe next run then writes ", sub_file,
                                                  " for the annotation after the GMM split.") else ""),

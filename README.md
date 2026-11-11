@@ -163,7 +163,8 @@ tested route.
 3. **GMM subclustering (optional).** As in MapMetSC, mixed clusters are split
    in the `gmm-subclustering` chunk of `analysis/04_phenotyping.Rmd`
    (`subcluster_map` / `marker_map`; currently k = 15 cluster 39 on MPO, CD15,
-   GD2 and CD56, the second component getting the next free k = 15 number).
+   GD2 and CD56 and cluster 32 on CD14 and CD274, the second components getting
+   the next free k = 15 numbers).
    The next run writes
    `<output>/annotation/cluster_annotation_BM_template_subclustering.xlsx`: a
    new first tab `annotations_after_subclustering` with the k = 15 clusters
@@ -171,7 +172,10 @@ tested route.
    from the `annotation` tab; the split cluster and the new subcluster are
    empty), followed by all tabs of the first workbook. 04 stops until that
    first tab is complete; fill it and run again. It is the tab used from then
-   on.
+   on. A split added later (a new entry in `subcluster_map`) is added to that
+   tab on the next run: the rows of the newly split cluster and of its new
+   subcluster are emptied for re-annotation, every other row is kept, and the
+   previous workbook is saved as `..._subclustering_backup_<date_time>.xlsx`.
 4. **Final run.** Run `run_analysis.R` again: the frozen intermediaries are
    reused, the annotation is applied and steps 4–7 complete.
 

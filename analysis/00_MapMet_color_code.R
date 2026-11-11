@@ -72,7 +72,8 @@ COL_METACLUSTER <- c(
   "B cells"             = "#88419D",
   "mesenchymal"         = "#8C510A",
   "proliferating cells" = "#FFD700",
-  "progenitors"         = "#F59E0B",
+  "progenitors"         = "#FFA500",  # = HSPCs cell-type color (plain orange)
+  "HSPCs"               = "#FFA500",
   "other"               = "#969696"
 )
 

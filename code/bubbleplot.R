@@ -270,11 +270,25 @@ plot_cluster_bubble <- function(cluster_col, save_name,
 
   col_for_annot <- setNames(list(annot_colors), annot_name)
 
+  # Roundness: mean (clipped) solidity of the cells of each cluster, as in
+  # MapMetSC's bubble plots (blue = least round, red = roundest cluster)
+  solidity_col <- intersect(c("solidity_clipped", "solidity"), names(colData(spe)))[1]
+  roundness <- NULL
+  if (!is.na(solidity_col)) {
+    roundness <- tapply(as.numeric(colData(spe)[[solidity_col]]),
+                        factor(cluster_vec, levels = clusters), mean, na.rm = TRUE)[clusters]
+    r_rng <- range(roundness, na.rm = TRUE)
+    if (diff(r_rng) == 0) r_rng <- r_rng + c(-1e-6, 1e-6)
+    col_for_annot$roundness <- circlize::colorRamp2(c(r_rng[1], mean(r_rng), r_rng[2]),
+                                                    c("blue", "white", "red"))
+  }
+
   info_list <- lapply(count_list, make_barplot_info)
   cluster_annotation_list <- setNames(
     list(factor(annot_values, levels = annot_levels)),
     annot_name
   )
+  if (!is.null(roundness)) cluster_annotation_list$roundness <- unname(roundness)
 
   col_fun <- circlize::colorRamp2(
     c(0, 0.5, 1),
