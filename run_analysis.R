@@ -182,7 +182,19 @@ if (!annotated) {
     # all six markers go into the merge (cytomapper's maximum)
     merge_exclude = character(0),
     # One zoom window c(xmin, xmax, ymin, ymax) per image id; NULL = whole image only.
-    crops    = list(NULL)
+    crops    = list(NULL),
+    # Cluster investigation: the ROI of the inv_timepoint samples with the most
+    # cells of inv_cluster (in inv_col; pg_raw_k15 = k = 15 before the GMM
+    # split) with inv_markers, and a collage of inv_n_cells random cells of
+    # that cluster in it (one row per cell, one column per marker).
+    # inv_cluster = "" skips it.
+    inv_col       = "pg_raw_k15",
+    inv_cluster   = "39",
+    inv_timepoint = "REL",
+    inv_n_cells   = 10,
+    inv_markers   = c("DNA1_Ir193_mean", "GD2_Gd155_mean", "MPO", "CD56", "GATA3", "CD15_Bi209_mean"),
+    inv_marker_colours = c(DNA1 = "blue", GD2 = "green", MPO = "magenta",
+                           CD56 = "red", GATA3 = "cyan", CD15 = "yellow")
   )
   render_step("analysis/07_generate_images.Rmd", image_params)
 

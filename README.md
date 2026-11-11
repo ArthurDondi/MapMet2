@@ -27,12 +27,12 @@ analyses the diagnostic primary tumors; both build on data processed with
 | 1 | `analysis/01_read_data.Rmd` — read the BM images and metadata; patient cohort overview | `spe_01_read_data.rds` |
 | 2 | `analysis/02_QC_1.Rmd` — exclude cells lost between IF and IMC | `spe_02_QC_1.rds` |
 | 3 | `analysis/03_QC_2.Rmd` — exclude segmentation artifacts | `spe_03_QC_2.rds` |
-| 4 | `analysis/04_phenotyping.Rmd` — UMAP, phenograph clustering (k = 15 / 30 / 45 / 60), label transfer from MapMetSC, two-pass cluster annotation | `spe_04_phenotyping.rds` |
+| 4 | `analysis/04_phenotyping.Rmd` — UMAP, phenograph clustering (k = 15 / 30 / 45 / 60), label transfer from MapMetSC, two-pass cluster annotation | `spe_04_phenotyping.rds`, `celltype_counts_per_sample.csv` |
 | 5.1 | `analysis/05.1_BM_cellularcomm.Rmd` — cellular communities: BM samples clustered (CLR, Euclidean, Ward.D2) on the composition of all cell types, of the immune cell types or of the T-cell types, each with and without the normal control BM (six reports); number of communities (at least 2) set per variant or chosen by bootstrap stability (`"auto"`), with silhouette / gap / stability diagnostics; stacked figures in community order and grouped by BM sample type | `communities_BM_<variant>.csv/.rds`, figures |
 | 5.2 | `analysis/05.2_BM_DA.Rmd` — differential abundance (diffcyt `testDA_voom`, as MapMetSC; patient as `block_id` where patients have several samples) at metacluster / all / tumor / immune cell-type level: DE, T1, T2 vs control; paired T1 vs DE, T2 vs DE, T2 vs T1; REL vs DE; MNA vs nMNA at DE and at T2; every pair of 05.1 communities (`community_variant`); plus per-cell-type abundance by BM sample type and per-patient trajectories of the relapse patients with an earlier BM sample | `DA_BM_results.csv`, figures |
 | 6.1 | `analysis/06.1_correlation_Fetahu.Rmd` — SingleR against NB-BM scRNA-seq ([Fetahu et al.](https://doi.org/10.1038/s41467-023-39210-0)) | figures |
 | 6.2 | `analysis/06.2_correlation_Lee.Rmd` — SingleR against healthy-BM scRNA-seq ([Lee et al.](https://doi.org/10.3389/fimmu.2023.1127879)) | figures |
-| 7 | `analysis/07_generate_images.Rmd` — marker / cell-type / metacluster images of selected BM images | figures |
+| 7 | `analysis/07_generate_images.Rmd` — marker / cell-type / metacluster images of selected BM images; cluster investigation: the REL ROI with the most cells of k = 15 cluster 39 (before the GMM split, `inv_*` settings in `run_analysis.R`) and a collage of 10 of its cells × 6 markers | figures |
 
 Shared colors and the timepoint labels are defined once in
 `analysis/00_MapMet_color_code.R`; the bubble-plot helper is `code/bubbleplot.R`.

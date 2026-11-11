@@ -1096,6 +1096,27 @@ for (cl in clusters) {
 }
 report_skipped(skipped_ct, "per-celltype")
 ```
+## Cell counts per sample
+
+Number of cells of each cell type (one line per cell type, in display order) in each sample (`fm_id`, one column per sample, ordered by BM sample type), with a `total` column; written to `<output>/celltype_counts_per_sample.csv`. A second header line gives each sample's BM sample type.
+
+```{r celltype-counts-per-sample}
+smp <- unique(as.data.frame(colData(spe))[, c("fm_id", "timepoint")])
+smp <- smp[!duplicated(smp$fm_id), ]
+smp <- smp[order(match(smp$timepoint, TIMEPOINT_LEVELS), smp$fm_id), ]
+ct_counts <- as.data.frame.matrix(table(factor(spe$celltype_ordered, levels = levels(spe$celltype_ordered)),
+                                        factor(spe$fm_id, levels = smp$fm_id)))
+ct_counts <- cbind(celltype = rownames(ct_counts), ct_counts, total = rowSums(ct_counts))
+counts_file <- file.path(params$output, "celltype_counts_per_sample.csv")
+# header: sample ids, then their BM sample type
+writeLines(c(paste(c("celltype", smp$fm_id, "total"), collapse = ","),
+             paste(c("timepoint", smp$timepoint, ""), collapse = ",")), counts_file)
+write.table(ct_counts, counts_file, sep = ",", append = TRUE, row.names = FALSE, col.names = FALSE, quote = TRUE)
+message("Wrote ", counts_file)
+knitr::kable(head(ct_counts[, c(1, ncol(ct_counts))], 50), row.names = FALSE,
+             caption = paste0("Cells per cell type (", nrow(smp), " samples; per-sample columns in the CSV)"))
+```
+
 ## Save object
 
 ```{r save-objects}

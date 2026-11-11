@@ -33,6 +33,18 @@ params:
   # window for the back-compat single-image path. NULL renders whole image only.
   crop:  !r NULL
   crops: !r NULL
+  # Cluster investigation (section "Cluster investigation"): the ROI of the
+  # chosen BM sample type with the most cells of `inv_cluster` (in the cluster
+  # column `inv_col`), rendered with `inv_markers`, plus a collage of
+  # `inv_n_cells` random cells of that cluster in that ROI (one row per cell,
+  # one column per marker). inv_cluster = "" skips the section.
+  inv_col: "pg_raw_k15"          # k = 15 phenograph clusters BEFORE the GMM split
+  inv_cluster: "39"
+  inv_timepoint: "REL"
+  inv_n_cells: 10
+  inv_halfwidth: 15              # zoom window = (2 * 15 + 1) px square around the cell centroid (1 px = 1 um)
+  inv_markers: !r c("DNA1_Ir193_mean", "GD2_Gd155_mean", "MPO", "CD56", "GATA3", "CD15_Bi209_mean")
+  inv_marker_colours: !r c(DNA1 = "blue", GD2 = "green", MPO = "magenta", CD56 = "red", GATA3 = "cyan", CD15 = "yellow")
 ---
 
 ```{r setup, include=FALSE}
@@ -411,4 +423,100 @@ for (i in seq_along(image_ids)) {
     plot_region(img_v, masks_v, tmp, markers, paste0(image_id, "_", vn), out_dir = image_id)
   }
 }
+```
+
+## Cluster investigation
+
+The ROI (image) of the `r params$inv_timepoint` samples with the most cells of cluster **`r params$inv_cluster`** of `r params$inv_col` (`pg_raw_k15` = the k = 15 phenograph clusters before the GMM split) is rendered like the images above, with the markers `r paste(sub("_.*$", "", params$inv_markers), collapse = ", ")`, plus a panel marking the cells of that cluster (red; the zoomed cells in yellow). Then `r params$inv_n_cells` random cells of the cluster in that ROI are zoomed individually (`r 2 * params$inv_halfwidth + 1` x `r 2 * params$inv_halfwidth + 1` px around the cell centroid, same orientation as the images) in one collage: one row per cell, one column per marker. Each marker is scaled black -> its colour from 0 to its 99.9th percentile in the whole ROI, so the intensities can be compared between cells; the grey outline marks the zoomed cell's mask. Output: `plots/07_generate_images/cluster_<cluster>_<timepoint>/`.
+
+```{r cluster-investigation, eval = nzchar(params$inv_cluster), fig.width = 8, fig.height = 14}
+stopifnot(params$inv_col %in% colnames(colData(spe)))
+inv_lab  <- as.character(colData(spe)[[params$inv_col]])
+in_cl    <- inv_lab == params$inv_cluster & spe$timepoint == params$inv_timepoint
+roi_tab  <- sort(table(as.character(spe$sample_id[in_cl])), decreasing = TRUE)
+if (!length(roi_tab)) stop("No cell of cluster ", params$inv_cluster, " in ", params$inv_timepoint, " samples.")
+roi_n    <- table(as.character(spe$sample_id))[names(roi_tab)]
+knitr::kable(head(data.frame(ROI = names(roi_tab), fm_id = spe$fm_id[match(names(roi_tab), spe$sample_id)],
+                             cells_in_cluster = as.integer(roi_tab), cells_in_ROI = as.integer(roi_n),
+                             pct = round(100 * as.integer(roi_tab) / as.integer(roi_n), 1)), 10),
+             caption = paste0("ROIs of ", params$inv_timepoint, " samples with the most cells of cluster ", params$inv_cluster))
+inv_roi <- names(roi_tab)[1]
+inv_dir <- paste0("cluster_", params$inv_cluster, "_", params$inv_timepoint)
+message("Cluster investigation: ROI ", inv_roi, " (", roi_tab[[1]], " cells of cluster ", params$inv_cluster, ")")
+
+# markers / colours for this section
+inv_markers <- unname(resolve_markers(params$inv_markers, marker_names))
+if (anyNA(inv_markers)) warning("Investigation markers not found (dropped): ",
+                                paste(params$inv_markers[is.na(inv_markers)], collapse = ", "))
+inv_markers <- inv_markers[!is.na(inv_markers)]
+inv_cols <- setNames(unname(params$inv_marker_colours[sub("_.*$", "", inv_markers)]), inv_markers)
+inv_cols[is.na(inv_cols)] <- "white"
+.marker_col_map <- c(inv_cols, .marker_col_map[setdiff(names(.marker_col_map), inv_markers)])
+
+loaded <- load_image(inv_roi)
+tmp    <- loaded$tmp
+tmp_lab <- as.character(colData(tmp)[[params$inv_col]])
+
+# random cells of the cluster in this ROI
+set.seed(20261111)
+cand <- tmp$ObjectNumber[tmp_lab == params$inv_cluster]
+sel  <- if (length(cand) > params$inv_n_cells) sort(sample(cand, params$inv_n_cells)) else sort(cand)
+
+# --- whole ROI: markers, merge, cell types, metaclusters + the cluster's cells ---
+img_v   <- rotate90_ccw(loaded$img)
+masks_v <- rotate90_ccw(loaded$masks)
+plot_region(img_v, masks_v, tmp, inv_markers, paste0(inv_roi, "_whole"), out_dir = inv_dir)
+tmp$inv_highlight <- ifelse(tmp$ObjectNumber %in% sel, "zoomed cells",
+                            ifelse(tmp_lab == params$inv_cluster, paste("cluster", params$inv_cluster), "other"))
+render_and_save(
+  plotCells(masks_v, object = tmp, cell_id = "ObjectNumber", img_id = "sample_id",
+            colour_by = "inv_highlight",
+            colour = list(inv_highlight = setNames(c("yellow", "red", "grey30"),
+                                                   c("zoomed cells", paste("cluster", params$inv_cluster), "other"))),
+            missing_colour = "white", image_title = NULL, scale_bar = scale_bar_spec,
+            return_plot = TRUE),
+  file.path(inv_dir, "no_mask", paste0(inv_roi, "_whole_cluster_", params$inv_cluster, "_cells.png")), 10, 8)
+
+# --- collage: one row per selected cell, one column per marker ---
+dat  <- EBImage::imageData(loaded$img[[1]])
+mk   <- EBImage::imageData(loaded$masks[[1]])
+hw   <- params$inv_halfwidth
+tiles <- list()
+for (obj in sel) {
+  pix <- which(mk == obj, arr.ind = TRUE)
+  cx <- round(mean(pix[, 1])); cy <- round(mean(pix[, 2]))
+  xr <- .clamp_axis(cx - hw, cx + hw, dim(mk)[1]); yr <- .clamp_axis(cy - hw, cy + hw, dim(mk)[2])
+  xs <- seq(xr[1], xr[2]); ys <- seq(yr[1], yr[2])
+  # same orientation as the images (rotate 90 degrees counter-clockwise)
+  rot <- function(m) EBImage::imageData(EBImage::flip(EBImage::transpose(EBImage::Image(m))))
+  border <- rot(.outer_border(mk[xs, ys] == obj))
+  for (m in inv_markers) {
+    ch  <- dat[, , which(channelNames(loaded$img) == m)[1]]
+    hi  <- stats::quantile(ch, 0.999, names = FALSE); if (!(hi > 0)) hi <- max(ch, 1e-9)
+    v   <- rot(pmin(ch[xs, ys] / hi, 1))
+    rgbc <- grDevices::col2rgb(inv_cols[[m]])[, 1] / 255
+    hex  <- grDevices::rgb(v * rgbc[1], v * rgbc[2], v * rgbc[3])
+    hex[border] <- "#9E9E9E"
+    tiles[[length(tiles) + 1]] <- data.frame(
+      x = as.vector(row(v)), y = -as.vector(col(v)), fill = hex,
+      cell = paste0("cell ", obj), marker = sub("_.*$", "", m))
+  }
+}
+tiles <- do.call(rbind, tiles)
+tiles$cell   <- factor(tiles$cell, levels = paste0("cell ", sel))
+tiles$marker <- factor(tiles$marker, levels = sub("_.*$", "", inv_markers))
+p_collage <- ggplot(tiles, aes(x, y, fill = fill)) +
+  geom_raster() +
+  scale_fill_identity() +
+  facet_grid(cell ~ marker, switch = "y") +
+  coord_equal(expand = FALSE) +
+  labs(title = paste0(inv_roi, ": cluster ", params$inv_cluster, " (", params$inv_col, "), ",
+                      length(sel), " random cells")) +
+  theme_void() +
+  theme(strip.text = element_text(size = 9), strip.text.y.left = element_text(angle = 0),
+        panel.spacing = unit(1, "mm"), plot.title = element_text(size = 9),
+        plot.background = element_rect(fill = "white", colour = NA))
+p_collage
+save_plot(p_collage, file.path(inv_dir, paste0(inv_roi, "_cluster_", params$inv_cluster, "_cells_collage.png")),
+          width = 1.2 * length(inv_markers) + 1.2, height = 1.2 * length(sel) + 0.6)
 ```
