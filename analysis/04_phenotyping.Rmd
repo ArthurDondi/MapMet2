@@ -964,9 +964,11 @@ metadata(spe)$color_vectors$col_timepoint   <- col_timepoint
 # Names without a MapMetSC color (they get a fallback color): rename them in the
 # annotation, or add them to COL_CELLTYPE / COL_METACLUSTER / PALETTE_ALIASES
 # in 00_MapMet_color_code.R
-unmatched <- rbind(
-  data.frame(type = "celltype",    name = attr(col_celltype, "unmatched")),
-  data.frame(type = "metacluster", name = attr(col_metacluster, "unmatched")))
+unmatched_of <- function(type, pal) {
+  nm <- as.character(attr(pal, "unmatched"))
+  data.frame(type = rep(type, length(nm)), name = nm)
+}
+unmatched <- rbind(unmatched_of("celltype", col_celltype), unmatched_of("metacluster", col_metacluster))
 if (nrow(unmatched)) {
   message("[04_phenotyping] no MapMetSC color for: ", paste(unmatched$name, collapse = ", "))
   knitr::kable(unmatched, caption = "Names without a MapMetSC color (fallback color used)")
