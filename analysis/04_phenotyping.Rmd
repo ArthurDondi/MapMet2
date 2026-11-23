@@ -363,7 +363,7 @@ for (k in k_values) {
     save_name = paste0("bubbleplot_pg_clusters_k", k, ".pdf"),
     group_col = "timepoint",
     group_colors = col_timepoint,
-    ncells_break_at = 40000
+    ncells_break_at = "auto"
   )
 }
 spe$pg_plot <- NULL
@@ -565,7 +565,7 @@ for (k in k_gmm) {
     cluster_col = col_k,
     group_col = "timepoint",
     group_colors = col_timepoint,
-    ncells_break_at = 40000,
+    ncells_break_at = "auto",
     save_name = paste0("bubbleplot_pg_clusters_k", k, "_after_subclustering.pdf"))
 
   # UMAP after subclustering
@@ -1018,7 +1018,7 @@ plot_cluster_bubble(
   annotation_level = "metacluster",
   group_col = "timepoint",
   group_colors = col_timepoint,
-  ncells_break_at = 40000,
+  ncells_break_at = "auto",
   plot_width      = 13,
   plot_height     = 11.5
 )
