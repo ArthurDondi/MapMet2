@@ -57,7 +57,7 @@ COL_CELLTYPE <- c(
   ## MapMet2 (BM) cell types
   "HSPCs"                     = "#FFA500",  # plain orange
   "CD4+ PD1+ T cells"         = "#B5475D",  # light bordeaux
-  "pDC"                       = "#6497D1",
+  "pDC"                       = "#0829F9",  # vivid ultramarine
   "PDL1+ MO"                  = "#0073E6",  # blue (the fallback color was too close to B cells)
   "VIM+ PDL1+ myeloid cells"  = "#B3CDE0"
 )

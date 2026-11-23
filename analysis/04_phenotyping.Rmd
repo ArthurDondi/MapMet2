@@ -37,6 +37,11 @@ if (!dir.exists(plot_dir)) {
   dir.create(plot_dir, recursive = TRUE)
 }
 
+# CSV tables: <output>/tables/<same subfolder as the plots>
+table_dir <- sub("/plots/", "/tables/", paste0(plot_dir, "/"), fixed = TRUE)
+table_dir <- sub("/$", "", table_dir)
+dir.create(table_dir, recursive = TRUE, showWarnings = FALSE)
+
 # Date prefix for filenames
 date_prefix <- format(Sys.Date(), "%Y%m%d")
 
@@ -1100,23 +1105,55 @@ report_skipped(skipped_ct, "per-celltype")
 ```
 ## Cell counts per sample
 
-Number of cells of each cell type (one line per cell type, in display order) in each sample (`fm_id`, one column per sample, ordered by BM sample type), with a `total` column; written to `<output>/celltype_counts_per_sample.csv`. A second header line gives each sample's BM sample type.
+Number of cells of each cell type (one line per cell type, in display order), written to `<output>/tables/04_phenotyping/celltype_counts_per_sample.csv`:
+
+* first line `total`: the column sums;
+* columns: `total` (all samples), then one subtotal per BM sample type (`total_control`, `total_DE`, `total_T1`, `total_T2`, `total_REL`), then one column per sample, named `<BM sample type>_<fm_id>` and ordered by BM sample type.
 
 ```{r celltype-counts-per-sample}
 smp <- unique(as.data.frame(colData(spe))[, c("fm_id", "timepoint")])
 smp <- smp[!duplicated(smp$fm_id), ]
 smp <- smp[order(match(smp$timepoint, TIMEPOINT_LEVELS), smp$fm_id), ]
-ct_counts <- as.data.frame.matrix(table(factor(spe$celltype_ordered, levels = levels(spe$celltype_ordered)),
-                                        factor(spe$fm_id, levels = smp$fm_id)))
-ct_counts <- cbind(celltype = rownames(ct_counts), ct_counts, total = rowSums(ct_counts))
-counts_file <- file.path(params$output, "celltype_counts_per_sample.csv")
-# header: sample ids, then their BM sample type
-writeLines(c(paste(c("celltype", smp$fm_id, "total"), collapse = ","),
-             paste(c("timepoint", smp$timepoint, ""), collapse = ",")), counts_file)
-write.table(ct_counts, counts_file, sep = ",", append = TRUE, row.names = FALSE, col.names = FALSE, quote = TRUE)
+tp_present <- intersect(TIMEPOINT_LEVELS, smp$timepoint)
+per_sample <- as.data.frame.matrix(table(factor(spe$celltype_ordered, levels = levels(spe$celltype_ordered)),
+                                         factor(spe$fm_id, levels = smp$fm_id)))
+colnames(per_sample) <- paste0(smp$timepoint, "_", smp$fm_id)
+subtotals <- sapply(tp_present, function(tp) rowSums(per_sample[, smp$timepoint == tp, drop = FALSE]))
+subtotals <- matrix(subtotals, nrow = nrow(per_sample), dimnames = list(rownames(per_sample), paste0("total_", tp_present)))
+ct_counts <- data.frame(total = rowSums(per_sample), subtotals, per_sample, check.names = FALSE)
+ct_counts <- rbind(total = colSums(ct_counts), ct_counts)
+ct_counts <- cbind(celltype = rownames(ct_counts), ct_counts)
+counts_file <- file.path(table_dir, "celltype_counts_per_sample.csv")
+write.csv(ct_counts, counts_file, row.names = FALSE)
 message("Wrote ", counts_file)
-knitr::kable(head(ct_counts[, c(1, ncol(ct_counts))], 50), row.names = FALSE,
-             caption = paste0("Cells per cell type (", nrow(smp), " samples; per-sample columns in the CSV)"))
+knitr::kable(ct_counts[, c("celltype", "total", paste0("total_", tp_present))], row.names = FALSE,
+             caption = paste0("Cells per cell type and BM sample type (", nrow(smp), " samples; per-sample columns in the CSV)"))
+```
+
+## Tumor cells per sample
+
+Number of cells of the metacluster `tumor` in each sample, one panel per BM sample type (the number of cells on top of each bar).
+
+```{r tumor-cells-per-sample, fig.width = 16, fig.height = 5}
+tumor_meta <- unique(as.character(spe$metacluster))
+tumor_meta <- tumor_meta[!is.na(tumor_meta) & norm_label(tumor_meta) == "tumor"]
+n_tumor <- table(factor(spe$fm_id[spe$metacluster %in% tumor_meta], levels = smp$fm_id))
+tum <- data.frame(fm_id = smp$fm_id, timepoint = factor(smp$timepoint, levels = tp_present),
+                  n = as.integer(n_tumor[smp$fm_id]))
+tum$fm_id <- factor(tum$fm_id, levels = tum$fm_id[order(tum$timepoint, -tum$n)])   # largest first per type
+p_tum <- ggplot(tum, aes(fm_id, n, fill = timepoint)) +
+  geom_col(width = 0.8) +
+  geom_text(aes(label = n), angle = 90, hjust = -0.15, vjust = 0.5, size = 2.3) +
+  facet_grid(. ~ timepoint, scales = "free_x", space = "free_x") +
+  scale_fill_manual(values = COL_TIMEPOINT, guide = "none") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(x = NULL, y = "tumor cells", title = "Cells of the metacluster tumor per sample") +
+  theme_classic(base_size = 10) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 6),
+        strip.background = element_blank(), strip.text = element_text(face = "bold"))
+p_tum
+save_plot(p_tum, "tumor_cells_per_sample.pdf", width = max(8, 0.15 * nrow(tum) + 2), height = 5)
+write.csv(tum[order(tum$timepoint, -tum$n), ], file.path(table_dir, "tumor_cells_per_sample.csv"), row.names = FALSE)
 ```
 
 ## Save object

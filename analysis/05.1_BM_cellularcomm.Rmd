@@ -35,6 +35,11 @@ if (!dir.exists(plot_dir)) {
   dir.create(plot_dir, recursive = TRUE)
 }
 
+# CSV tables: <output>/tables/<same subfolder as the plots>
+table_dir <- sub("/plots/", "/tables/", paste0(plot_dir, "/"), fixed = TRUE)
+table_dir <- sub("/$", "", table_dir)
+dir.create(table_dir, recursive = TRUE, showWarnings = FALSE)
+
 date_prefix <- format(Sys.Date(), "%Y%m%d")
 
 # Save a plot (ggplot / patchwork / grob) as PDF or PNG, by file extension
@@ -245,7 +250,7 @@ stab_k <- if (any(stab_min >= 0.75)) max(k_range[stab_min >= 0.75]) else gap_k
 knitr::kable(k_diag, digits = 3,
              caption = paste0("Best k: bootstrap stability (largest k with all Jaccard >= 0.75) = ", stab_k,
                               ", gap statistic (firstSEmax) = ", gap_k, ", silhouette = ", sil_k))
-write.csv(k_diag, file.path(plot_dir, paste0(date_prefix, "_n_communities_criteria.csv")), row.names = FALSE)
+write.csv(k_diag, file.path(table_dir, paste0(date_prefix, "_n_communities_criteria.csv")), row.names = FALSE)
 
 n_comm <- if (identical(as.character(params$n_communities), "auto")) stab_k else as.integer(params$n_communities)
 n_comm <- max(2L, as.integer(n_comm))   # at least 2 communities
@@ -298,7 +303,7 @@ We save each sample's community with its metadata for the downstream analyses (0
 ```{r save-communities}
 out_tab <- samples[clustered_samples, ]
 out_tab$cluster_on <- params$cluster_on
-write.csv(out_tab, file.path(params$output, paste0("communities_BM_", variant, ".csv")), row.names = FALSE)
+write.csv(out_tab, file.path(table_dir, paste0("communities_BM_", variant, ".csv")), row.names = FALSE)
 saveRDS(out_tab, file.path(params$output, paste0("communities_BM_", variant, ".rds")))
 ```
 

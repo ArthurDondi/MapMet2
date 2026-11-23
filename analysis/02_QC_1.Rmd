@@ -24,6 +24,11 @@ if (!dir.exists(plot_dir)) {
   dir.create(plot_dir, recursive = TRUE)
 }
 
+# CSV tables: <output>/tables/<same subfolder as the plots>
+table_dir <- sub("/plots/", "/tables/", paste0(plot_dir, "/"), fixed = TRUE)
+table_dir <- sub("/$", "", table_dir)
+dir.create(table_dir, recursive = TRUE, showWarnings = FALSE)
+
 date_prefix <- format(Sys.Date(), "%Y%m%d")
 
 # Save a plot (ggplot / Heatmap / base R)
@@ -236,7 +241,7 @@ The cluster with DAPI signal but no IMC markers in the heatmap above is the "los
 2. the frozen `kept_cells_BM.rds` (in `MAPMET2_INTERMEDIARY`, `<input>/R_intermediary`, `<input>/../R_intermediary` or `<output>/R_intermediary`);
 3. the IMC-DNA heuristic above (first run). The resulting list is frozen to `<output>/R_intermediary/kept_cells_BM.rds`.
 
-The decision is recorded in `plots/02_QC_1/<date>_lost_cell_clusters.csv` - one row per QC cluster with its cell count, mean IMC DNA and DAPI, whether the heuristic flagged it, and how many of its cells were excluded - as one line in the job log (`[02_QC_1] lost-cell exclusion ...`), and in the table below.
+The decision is recorded in `tables/02_QC_1/<date>_lost_cell_clusters.csv` - one row per QC cluster with its cell count, mean IMC DNA and DAPI, whether the heuristic flagged it, and how many of its cells were excluded - as one line in the job log (`[02_QC_1] lost-cell exclusion ...`), and in the table below.
 
 ```{r load-kept-cells, message=TRUE}
 kept_name <- "kept_cells_BM.rds"
@@ -298,7 +303,7 @@ if (!startsWith(kept_source, "frozen list")) {
 }
 
 # Written record: CSV next to the plots, plus one line in the job log (stderr)
-report_file <- file.path(plot_dir, paste0(date_prefix, "_lost_cell_clusters.csv"))
+report_file <- file.path(table_dir, paste0(date_prefix, "_lost_cell_clusters.csv"))
 write.csv(lost_report, report_file, row.names = FALSE)
 cat(sprintf("[02_QC_1] lost-cell exclusion via %s: kept %d of %d cells; clusters with excluded cells: %s; report: %s\n",
             kept_source, ncol(spe), n_before,

@@ -27,6 +27,11 @@ if (!dir.exists(plot_dir)) {
   dir.create(plot_dir, recursive = TRUE)
 }
 
+# CSV tables: <output>/tables/<same subfolder as the plots>
+table_dir <- sub("/plots/", "/tables/", paste0(plot_dir, "/"), fixed = TRUE)
+table_dir <- sub("/$", "", table_dir)
+dir.create(table_dir, recursive = TRUE, showWarnings = FALSE)
+
 date_prefix <- format(Sys.Date(), "%Y%m%d")
 
 # Save a plot (ggplot / patchwork) as PDF or PNG, by file extension
@@ -129,7 +134,8 @@ rownames(samples) <- samples$fm_id
 
 # Cellular communities from 05.1
 samples$community <- NA_character_
-comm_file <- file.path(params$output, paste0("communities_BM_", params$community_variant, ".csv"))
+comm_file <- file.path(params$output, "tables/05.1_BM_cellularcomm", params$community_variant,
+                       paste0("communities_BM_", params$community_variant, ".csv"))
 if (nzchar(params$community_variant)) {
   if (file.exists(comm_file)) {
     comm <- read.csv(comm_file, colClasses = c(fm_id = "character"))
@@ -363,10 +369,10 @@ for (cmp_name in names(comparisons)) {
 }
 da_results <- do.call(rbind, all_res)
 rownames(da_results) <- NULL
-write.csv(da_results, file.path(params$output, "DA_BM_results.csv"), row.names = FALSE)
+write.csv(da_results, file.path(table_dir, "DA_BM_results.csv"), row.names = FALSE)
 ```
 
-All results are saved to `DA_BM_results.csv` in the output folder. Results with an adjusted p-value below `r params$fdr`:
+All results are saved to `tables/05.2_BM_DA/DA_BM_results.csv` in the output folder. Results with an adjusted p-value below `r params$fdr`:
 
 ```{r significant}
 sig <- da_results[!is.na(da_results$p_adj) & da_results$p_adj < params$fdr,
