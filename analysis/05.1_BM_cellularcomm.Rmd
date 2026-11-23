@@ -105,11 +105,19 @@ col_celltype    <- metadata(spe)$color_vectors$col_celltype_ordered
 col_metacluster <- metadata(spe)$color_vectors$col_metacluster
 ct_levels       <- levels(spe$celltype_ordered)
 
-cells <- as.data.frame(colData(spe))[, c("fm_id", "patient_id", "timepoint", "celltype", "metacluster",
+cells <- as.data.frame(colData(spe))[, c("fm_id", "sample_id", "patient_id", "timepoint", "celltype", "metacluster",
                                          "MYCN_amp", "X1p_loss", "progression", "age_diag")]
 cells$celltype <- factor(as.character(cells$celltype), levels = ct_levels)
 if (!isTRUE(params$include_controls)) cells <- cells[cells$timepoint != "control", ]
 rm(spe); invisible(gc())
+
+# ROIs (images, sample_id) per sample, before any sample is left out
+roi_tab <- cells %>%
+  group_by(fm_id) %>%
+  summarise(patient_id = first(as.character(patient_id)), timepoint = first(as.character(timepoint)),
+            n_rois = n_distinct(sample_id), rois = paste(sort(unique(as.character(sample_id))), collapse = "; "),
+            n_cells_all = n(), .groups = "drop") %>%
+  as.data.frame()
 
 # Immune compartment (as in MapMetSC: not tumor, mesenchymal or other)
 immune_meta <- setdiff(unique(as.character(cells$metacluster)), c("tumor", "mesenchymal", "other", NA))
@@ -509,6 +517,26 @@ p_combined_tp <- stacked_figure(ord_tp, as.character(samples[ord_tp, "timepoint"
                                 segs_tp, "BM sample", clust_title)
 p_combined_tp
 save_plot(p_combined_tp, "combined_stacked_by_timepoint.pdf", width = fig_width(length(ord_tp)), height = 15)
+```
+
+## Sample metadata
+
+One line per sample (`fm_id`) of this report, with its number of ROIs (images) and their ids, cells, BM sample type, genetic / clinical metadata, tumor fraction and heterogeneity, and community. Samples left out of the clustering (too few cells) are listed too, with `clustered = no` and no community. Written to `tables/05.1_BM_cellularcomm/`r variant`/sample_metadata_`r variant`.csv`.
+
+```{r sample-metadata-table}
+meta_cols <- c("fm_id", "mycn", "loss1p", "prog", "age_diag", "n_cells", "pct_tumor", "het_tumor", "het_immune", "community")
+sample_meta <- merge(roi_tab, samples[, meta_cols], by = "fm_id", all.x = TRUE, sort = FALSE)
+sample_meta$clustered <- ifelse(sample_meta$fm_id %in% clustered_samples, "yes", "no")
+sample_meta <- sample_meta[order(match(sample_meta$timepoint, TIMEPOINT_LEVELS), sample_meta$patient_id, sample_meta$fm_id), ]
+sample_meta <- sample_meta[, c("fm_id", "patient_id", "timepoint", "n_rois", "rois", "n_cells_all", "clustered",
+                               "community", "mycn", "loss1p", "prog", "age_diag", "pct_tumor", "het_tumor", "het_immune")]
+write.csv(sample_meta, file.path(table_dir, paste0("sample_metadata_", variant, ".csv")), row.names = FALSE)
+
+knitr::kable(as.data.frame.matrix(table(timepoint = factor(sample_meta$timepoint, levels = intersect(TIMEPOINT_LEVELS, sample_meta$timepoint)),
+                                        ROIs = sample_meta$n_rois)),
+             caption = "Number of samples by BM sample type (rows) and number of ROIs per sample (columns)")
+knitr::kable(sample_meta[, setdiff(colnames(sample_meta), "rois")], digits = 2, row.names = FALSE,
+             caption = "Sample metadata (ROI ids in the CSV)")
 ```
 
 ## Session Info
