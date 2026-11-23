@@ -30,15 +30,12 @@ helper script `00_MapMet_color_code.R`, which every step sources.
 4. [Cell phenotyping](04_phenotyping.html) — clustering, label transfer from
    MapMetSC, and the two-pass cluster annotation
 5. Bone-marrow sample analysis
-    - 5.1 Cellular communities, samples clustered on all cell types
-      ([with the normal control BM](05.1_BM_cellularcomm_all_with_controls.html),
-      [NB-patient samples only](05.1_BM_cellularcomm_all_without_controls.html))
-      or on immune cell types
-      ([with the normal control BM](05.1_BM_cellularcomm_immune_with_controls.html),
-      [NB-patient samples only](05.1_BM_cellularcomm_immune_without_controls.html))
-      or on T-cell types
-      ([with the normal control BM](05.1_BM_cellularcomm_tcell_with_controls.html),
-      [NB-patient samples only](05.1_BM_cellularcomm_tcell_without_controls.html))
+    - 5.1 Cellular communities of the NB-patient samples, clustered on
+      [all cell types](05.1_BM_cellularcomm_all_without_controls.html),
+      [immune cell types](05.1_BM_cellularcomm_immune_without_controls.html),
+      [T-cell types](05.1_BM_cellularcomm_tcell_without_controls.html),
+      [metaclusters](05.1_BM_cellularcomm_metacluster_without_controls.html) or
+      [immune metaclusters](05.1_BM_cellularcomm_immune_metacluster_without_controls.html)
     - [5.2 Differential abundance](05.2_BM_DA.html) — control vs patient BM,
       timepoints (paired by patient), relapse, MYCN status and communities
 6. Validation by correlation with reference scRNA-seq datasets

@@ -10,10 +10,12 @@ params:
   input: !r Sys.getenv("MAPMET2_INPUT", "/mnt/data/input_all")
   output: !r Sys.getenv("MAPMET2_OUTPUT", "/mnt/data/output_mapmet2")
   # TRUE: all BM samples incl. the normal control BM; FALSE: NB-patient samples only
-  include_controls: TRUE
+  include_controls: FALSE
   # Composition the samples are clustered on: "all" (all cell types),
-  # "immune" (immune cell types, within the immune cells) or "tcell" (T-cell
-  # types, within the cells of the "T cells" metacluster)
+  # "immune" (immune cell types, within the immune cells), "tcell" (T-cell
+  # types, within the cells of the "T cells" metacluster), "metacluster" (all
+  # cells, metacluster level) or "immune_metacluster" (immune cells,
+  # metacluster level)
   cluster_on: "all"
   # Number of communities cut from the sample dendrogram, or "auto" (the largest
   # k whose communities are all bootstrap-stable, see "Number of communities")
@@ -24,7 +26,7 @@ params:
   n_boot: 100
   # Samples with fewer cells are left out (their composition is too noisy)
   min_cells: 100
-  # ... and, for cluster_on = "immune" / "tcell", samples with fewer cells in that compartment
+  # ... and, for the immune / T-cell variants, samples with fewer cells in that compartment
   min_cells_compartment: 10
 ---
 
@@ -71,7 +73,7 @@ knitr::opts_chunk$set(
 
 # Cellular communities in bone-marrow samples {#bm-cellularcomm}
 
-Adapted from MapMetSC's `05.1_PT_DE_cellularcomm.Rmd`, which clusters diagnostic primary tumors on their tumor cell-type composition. Here we cluster **bone-marrow samples** on the composition of `r c(all = "**all their cell types**", immune = "their **immune cell types** (within the immune cells)", tcell = "their **T-cell types** (within the T cells)")[[params$cluster_on]]`. This report is the variant **`r variant`**: `r if (isTRUE(params$include_controls)) "all BM samples, including the normal control BM" else "the NB-patient BM samples only (DE, T1, T2, REL), without the normal control BM"`.
+Adapted from MapMetSC's `05.1_PT_DE_cellularcomm.Rmd`, which clusters diagnostic primary tumors on their tumor cell-type composition. Here we cluster **bone-marrow samples** on the composition of `r c(all = "**all their cell types**", immune = "their **immune cell types** (within the immune cells)", tcell = "their **T-cell types** (within the T cells)", metacluster = "their **metaclusters** (all cells)", immune_metacluster = "their **immune metaclusters** (within the immune cells)")[[params$cluster_on]]`. This report is the variant **`r variant`**: `r if (isTRUE(params$include_controls)) "all BM samples, including the normal control BM" else "the NB-patient BM samples only (DE, T1, T2, REL), without the normal control BM"`.
 
 The combined figures stack the sample dendrogram, the composition used for the clustering, the BM sample type (timepoint), the community, the patient-level genetic / clinical tracks, the age at diagnosis and the tumor / immune heterogeneity (Shannon entropy), and the tumor, immune and metacluster compositions (clustered on immune or T-cell types, the all-cell-type composition replaces the immune one, so every variant has the same panels); a second version groups the samples by BM sample type and orders them by clustering within each group.
 
@@ -117,8 +119,14 @@ tcell_meta <- unique(as.character(cells$metacluster))
 tcell_meta <- tcell_meta[!is.na(tcell_meta) & norm_label(tcell_meta) == "tcell"]
 
 # Compartment the samples are clustered on (NULL = all cells)
-stopifnot(params$cluster_on %in% c("all", "immune", "tcell"))
-clust_meta <- switch(params$cluster_on, all = NULL, immune = immune_meta, tcell = tcell_meta)
+stopifnot(params$cluster_on %in% c("all", "immune", "tcell", "metacluster", "immune_metacluster"))
+clust_meta <- switch(params$cluster_on, all = NULL, immune = immune_meta, tcell = tcell_meta,
+                     metacluster = NULL, immune_metacluster = immune_meta)
+# Level of the composition: cell types, or metaclusters
+clust_var  <- if (params$cluster_on %in% c("metacluster", "immune_metacluster")) "metacluster" else "celltype"
+clust_title <- c(all = "All cell types (clustering)", immune = "Immune cell types (clustering)",
+                 tcell = "T-cell types (clustering)", metacluster = "Metaclusters (clustering)",
+                 immune_metacluster = "Immune metaclusters (clustering)")[[params$cluster_on]]
 if (params$cluster_on == "tcell" && !length(clust_meta))
   stop("cluster_on = \"tcell\": no metacluster named \"T cells\" in the annotation.")
 
@@ -186,7 +194,7 @@ linkage    <- "ward.D2"
 CLR_PSEUDO <- 0.5
 
 clust_cells <- if (!is.null(clust_meta)) cells[cells$metacluster %in% clust_meta, ] else cells
-counts_ct <- as.matrix(table(factor(clust_cells$fm_id, levels = samples$fm_id), droplevels(clust_cells$celltype)))
+counts_ct <- as.matrix(table(factor(clust_cells$fm_id, levels = samples$fm_id), droplevels(factor(clust_cells[[clust_var]]))))
 counts_ct <- counts_ct[, colSums(counts_ct) > 0, drop = FALSE]
 prop_ct   <- counts_ct / rowSums(counts_ct)
 cmat_adj  <- sweep(prop_ct, 1, CLR_PSEUDO / rowSums(counts_ct), "+")
@@ -311,7 +319,7 @@ saveRDS(out_tab, file.path(params$output, paste0("communities_BM_", variant, ".r
 
 ```{r dendrogram, fig.height=6, fig.width=10}
 p_dend_plain <- ggdendrogram(hc, labels = length(clustered_samples) <= 80) +
-  ggtitle(paste0("Samples clustered on ", params$cluster_on, " cell types (CLR, ", distance, ", ", linkage, ")"))
+  ggtitle(paste0("Samples clustered on: ", clust_title, " (CLR, ", distance, ", ", linkage, ")"))
 p_dend_plain
 save_plot(p_dend_plain, "dendrogram.pdf", width = 10, height = 6)
 ```
@@ -416,7 +424,7 @@ stacked_figure <- function(ordered, group, segs, top_title, clustering_title) {
   }
   cells_k  <- cells[cells$fm_id %in% ordered, ]
   p_clust  <- comp_bar(if (!is.null(clust_meta)) cells_k[cells_k$metacluster %in% clust_meta, ] else cells_k,
-                       "celltype", col_celltype, clustering_title)
+                       clust_var, if (clust_var == "metacluster") col_metacluster else col_celltype, clustering_title)
   p_all    <- comp_bar(cells_k, "celltype", col_celltype, "All cell types")
   p_tumor  <- comp_bar(cells_k[cells_k$metacluster == "tumor", ], "celltype", col_celltype, "Tumor cell types")
   p_immune <- comp_bar(cells_k[cells_k$metacluster %in% immune_meta, ], "celltype", col_celltype, "Immune cell types")
@@ -457,18 +465,21 @@ stacked_figure <- function(ordered, group, segs, top_title, clustering_title) {
                  strip_cont("het_tumor",  "TU het.",      "viridis"),
                  strip_cont("het_immune", "immune het.",  "cividis"))
 
-  # Same number of panels in every variant: clustered on all cell types, the
-  # clustering panel is the all-cell-type panel (+ immune panel); clustered on
-  # immune / T-cell types, the all-cell-type panel replaces the immune panel.
+  # Same number of panels in every variant, without repeating the clustering
+  # panel: all cell types -> + tumor, immune, metaclusters; immune / T-cell
+  # types -> + all cell types, tumor, metaclusters; metaclusters (all or
+  # immune cells) -> + all, tumor and immune cell types.
   panels  <- c(list(p_top, p_clust), strips,
-               if (params$cluster_on == "all") list(p_tumor, p_immune) else list(p_all, p_tumor),
-               list(p_meta))
+               switch(params$cluster_on,
+                      all                = list(p_tumor, p_immune, p_meta),
+                      immune             = list(p_all, p_tumor, p_meta),
+                      tcell              = list(p_all, p_tumor, p_meta),
+                      metacluster        = list(p_all, p_tumor, p_immune),
+                      immune_metacluster = list(p_all, p_tumor, p_immune)))
   heights <- c(2, 4, rep(0.3, length(strips)), 3, 3, 3)
   wrap_plots(panels, ncol = 1) + plot_layout(heights = heights, guides = "collect")
 }
 fig_width  <- function(M) max(14, 8 + 0.05 * M)   # wider for the two-column legends
-clust_title <- c(all = "All cell types (clustering)", immune = "Immune cell types (clustering)",
-                 tcell = "T-cell types (clustering)")[[params$cluster_on]]
 ```
 
 ```{r combined-figure, fig.width=18, fig.height=15}
