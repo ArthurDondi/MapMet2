@@ -166,24 +166,25 @@ plot_cluster_bubble <- function(cluster_col, save_name,
   # Barplot info helper (optional axis break)
   fs_axis   <- if (few_ticks) 10 else 12
   fmt_count <- function(x) ifelse(x == 0, "0", ifelse(x >= 1000, paste0(signif(x / 1000, 3), "k"), as.character(x)))
-  # smallest "nice" number (1, 2, 2.5, 5 x 10^n) >= x
-  nice_ceiling <- function(x) {
-    if (!(x > 0)) return(1)
+  # largest "nice" number (1, 2, 2.5, 5 x 10^n) <= x
+  nice_floor <- function(x) {
+    if (!(x >= 1)) return(0)
     p <- 10^floor(log10(x)); m <- c(1, 2, 2.5, 5, 10)
-    p * m[which(m >= x / p - 1e-9)[1]]
+    p * max(m[m <= x / p + 1e-9])
   }
   # "auto" break, per barplot: only the tallest bar can go above the break,
-  # when it is more than twice the second tallest; the axis is then broken just
-  # above the second tallest bar. Otherwise no break.
+  # when it is more than twice the second tallest; the axis is then broken one
+  # cell above the second tallest bar. Otherwise no break.
   auto_break <- function(v) {
     s <- sort(v[v > 0], decreasing = TRUE)
     if (length(s) < 2 || !(s[1] > 2 * s[2])) return(Inf)
-    nice_ceiling(s[2] * 1.05)
+    s[2] + 1
   }
-  # Height of the band above the break: just enough to keep the break label and
-  # the max label (at the top of the axis) from overlapping
+  # Height of the band above the break: one label height, so that the break
+  # mark sits right under the max label and the tick below the break cannot
+  # overlap the max label
   bar_h_cm <- tryCatch(convertHeight(barplot_height, "cm", valueOnly = TRUE), error = function(e) 2)
-  top_frac <- min(0.45, max(0.12, 1.4 * (fs_axis / 72 * 2.54) / bar_h_cm))
+  top_frac <- min(0.45, max(0.06, 1.05 * (fs_axis / 72 * 2.54) / bar_h_cm))
 
   make_barplot_info <- function(v) {
     v_num   <- as.numeric(v)
@@ -204,10 +205,12 @@ plot_cluster_bubble <- function(cluster_col, save_name,
     }
 
     # Break case: above-break bars are drawn up to the top of the axis, in a
-    # band of top_frac of the barplot height; the top tick gives the max count
+    # band of top_frac of the barplot height; the top tick gives the max count.
+    # Below the break: 0 and one tick, the largest round number (1, 2, 2.5 or
+    # 5 x 10^n) not above the break.
     ylim_max    <- brk / (1 - top_frac)
     values_plot <- ifelse(v_num > brk, ylim_max, v_num)
-    at_below    <- if (few_ticks) c(0, brk) else { a <- pretty(c(0, brk), n = 4); a[a <= brk] }
+    at_below    <- unique(c(0, nice_floor(brk)))
     list(
       values           = values_plot,
       upper            = ylim_max,
