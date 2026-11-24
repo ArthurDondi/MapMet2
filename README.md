@@ -98,7 +98,7 @@ each Rmd's `params`):
 | `MAPMET2_INTERMEDIARY` | *(empty)* | extra folder searched first for frozen intermediaries / the filled annotation |
 | `MAPMET2_ANNOTATION` | *(empty)* | path of the filled cluster annotation (default: the workbook in `<output>/annotation/`, see below) |
 | `MAPMET2_ANNOTATION_FALLBACK` | `none` | `transfer` = use the SingleR-transferred MapMetSC labels when no filled annotation exists |
-| `MAPMET2_START_FROM` | `01` | first step to render (`01`–`07`); earlier steps are skipped and their saved `spe_*.rds` objects reused, e.g. `04` to redo only the phenotyping / annotation (`MAPMET2_START_FROM=04 sbatch run_mapmet2_slurm.sh`) |
+| `MAPMET2_START_FROM` | `start_from` in `run_analysis.R` (`01`) | first step to render (`01`–`07`); overrides the `start_from` default of `run_analysis.R` when set; earlier steps are skipped and their saved `spe_*.rds` objects reused, e.g. `04` to redo only the phenotyping / annotation (`MAPMET2_START_FROM=04 sbatch run_mapmet2_slurm.sh`) |
 
 ## Usage
 

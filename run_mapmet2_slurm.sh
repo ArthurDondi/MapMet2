@@ -67,8 +67,9 @@ INTERMEDIARY="${MAPMET2_INTERMEDIARY:-$OUTPUT/R_intermediary}"
 # Optional: MapMetSC's annotated object, used as the SingleR reference for the
 # label transfer in 04_phenotyping. Leave empty to skip the transfer.
 REFERENCE="${MAPMET2_REFERENCE:-$DATA/Publication/output/spe_04_phenotyping.rds}"
-# First step to render (01-07; see run_analysis.R). Default: everything.
-START_FROM="${MAPMET2_START_FROM:-01}"
+# First step to render (01-07). Empty = the start_from default in
+# run_analysis.R; set at submit time to override it (MAPMET2_START_FROM=04 sbatch ...).
+START_FROM="${MAPMET2_START_FROM:-}"
 # ----------------------------------------------------------------------------
 
 echo "======================"
@@ -83,7 +84,7 @@ echo "public     : $PUBLIC"
 echo "output     : $OUTPUT"
 echo "intermed.  : $INTERMEDIARY"
 echo "reference  : ${REFERENCE:-<none>}"
-echo "start from : step $START_FROM"
+echo "start from : ${START_FROM:-<run_analysis.R default>}"
 echo "started    : $(date)"
 echo "======================"
 
@@ -111,6 +112,11 @@ export APPTAINERENV_OPENBLAS_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 BINDS=(--bind "$DATA" --bind "$OUTPUT" --bind "$INTERMEDIARY" --bind "$SLURM_SUBMIT_DIR")
 [[ -n "$REFERENCE" ]] && BINDS+=(--bind "$(dirname "$REFERENCE")")
 
+# Pass MAPMET2_START_FROM only when it was set, so that run_analysis.R's own
+# default applies otherwise.
+EXTRA_ENV=()
+[[ -n "$START_FROM" ]] && EXTRA_ENV+=(--env MAPMET2_START_FROM="$START_FROM")
+
 # --cleanenv: do NOT inherit the host shell env (an active conda `base` sets
 # LD_LIBRARY_PATH to conda libs, which can shadow the image's own libraries and
 # break e.g. git2r's libgit2). --env / APPTAINERENV_* still pass through.
@@ -123,7 +129,7 @@ apptainer exec \
     --env MAPMET2_OUTPUT="$OUTPUT" \
     --env MAPMET2_INTERMEDIARY="$INTERMEDIARY" \
     --env MAPMET2_REFERENCE="$REFERENCE" \
-    --env MAPMET2_START_FROM="$START_FROM" \
+    ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} \
     "$SIF" \
     Rscript run_analysis.R
 
