@@ -445,6 +445,34 @@ for (lvl_name in names(levels_cfg)) {
 }
 ```
 
+## All cell types per BM sample type (common 0-100% scale)
+
+All cell types, one panel each (5 panels per row), with one box per BM sample type (normal control BM, DE, T1, T2, REL) over all samples of that type: % of all cells of the sample. Every panel uses the same 0-100% y axis. Descriptive (no tests, paired samples not joined).
+
+```{r celltypes-by-timepoint-fixed, fig.width=14, fig.height=12}
+tp_all <- intersect(TIMEPOINT_LEVELS, unique(samples$timepoint))
+d_all  <- cells[!is.na(cells$celltype), ]
+cnt    <- table(factor(d_all$fm_id, levels = samples$fm_id), droplevels(d_all$celltype))
+fr     <- as.data.frame(as.table(100 * cnt / rowSums(cnt)), stringsAsFactors = FALSE)
+colnames(fr) <- c("fm_id", "celltype", "Freq")
+fr$timepoint <- factor(samples[fr$fm_id, "timepoint"], levels = tp_all)
+fr$celltype  <- factor(fr$celltype, levels = colnames(cnt))
+n_tp <- table(factor(samples$timepoint, levels = tp_all))
+n_ct <- nlevels(fr$celltype); n_row <- ceiling(n_ct / 5)
+p_fixed <- ggplot(fr, aes(timepoint, Freq, fill = timepoint)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(width = 0.15, height = 0, size = 0.5, alpha = 0.6) +
+  facet_wrap(~ celltype, ncol = 5) +
+  scale_fill_manual(values = COL_TIMEPOINT, guide = "none") +
+  scale_x_discrete(labels = function(x) paste0(x, "\n(n=", as.integer(n_tp[x]), ")")) +
+  scale_y_continuous(limits = c(0, 100), expand = expansion(mult = c(0.01, 0.02))) +
+  labs(x = NULL, y = "% of all cells", title = "All cell types per BM sample type") +
+  theme_bw(base_size = 9) +
+  theme(strip.text = element_text(size = 8))
+p_fixed
+save_plot(p_fixed, "celltypes_by_timepoint_0-100.pdf", width = 14, height = 2.6 * n_row + 0.8)
+```
+
 ## Relapse patients with an earlier BM sample
 
 The patients with a relapse (REL) sample and at least one other BM sample (DE, T1 or T2): every cluster on its own panel, one line per patient joining that patient's samples (% of the cells of the level's compartment; the mean when a patient has several samples at one timepoint). Descriptive; `REL_vs_DE` above is the test.
